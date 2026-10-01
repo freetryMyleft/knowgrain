@@ -98,6 +98,21 @@ class ProvenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.validate(items)
         self.assertEqual(repository.id_calls, [[revision.revision_id]])
 
+    async def test_stored_revision_resolves_basename_but_unknown_id_cannot_fallback(self):
+        revision = self.make_revision("notes.txt", b"Verified original.")
+        repository = RepositoryStub([revision])
+        service = ProvenanceService(repository, self.vault)
+        chunk = {"file_path": "notes.txt", "chunk_id": "stored-chunk",
+                 "content": "Verified original.",
+                 "source_revision_id": str(revision.revision_id)}
+        items = await service.collect(self.response(chunk))
+        self.assertEqual(items[0].vault_path, revision.vault_path)
+        self.assertEqual(repository.id_calls, [[revision.revision_id]])
+        with self.assertRaises(EvidenceUnavailableError):
+            await service.collect(self.response({**chunk, "file_path": revision.vault_path,
+                                                 "source_revision_id": str(uuid4())}))
+
+
     async def test_entities_unknown_paths_and_malformed_chunks_are_ignored(self):
         content = b"A source-backed sentence."
         revision = self.make_revision("notes.txt", content)

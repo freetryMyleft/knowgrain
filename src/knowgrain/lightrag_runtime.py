@@ -2,6 +2,7 @@ import asyncio
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from knowgrain.config import Settings
 
@@ -380,7 +381,34 @@ class LightRAGRuntime:
         from lightrag import QueryParam
 
         rag = self._require_started()
-        return await rag.aquery_data(query, param=QueryParam(mode=mode))
+        raw = await rag.aquery_data(query, param=QueryParam(mode=mode))
+        if not isinstance(raw, dict) or not isinstance(raw.get("data"), dict):
+            return raw
+        chunks = raw["data"].get("chunks")
+        if not isinstance(chunks, list):
+            return raw
+        candidates = [
+            item for item in chunks[:50]
+            if isinstance(item, dict) and isinstance(item.get("chunk_id"), str)
+            and 0 < len(item["chunk_id"]) <= 256
+            and not any(ord(character) < 32 for character in item["chunk_id"])
+        ]
+        ids = list(dict.fromkeys(item["chunk_id"] for item in candidates))
+        records = await rag.text_chunks.get_by_ids(ids) if ids else []
+        by_id = dict(zip(ids, records, strict=True))
+        verified = []
+        for chunk in candidates:
+            stored = by_id[chunk["chunk_id"]]
+            if not isinstance(stored, dict) or stored.get("content") != chunk.get("content"):
+                continue
+            try:
+                revision_id = UUID(stored["full_doc_id"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+            # Core normalizes file_path to a display basename. The stored
+            # parent document ID is the revision UUID supplied by index_text.
+            verified.append({**chunk, "source_revision_id": str(revision_id)})
+        return {**raw, "data": {**raw["data"], "chunks": verified}}
 
     async def generate_json(self, system_prompt: str, prompt: str) -> str:
         """Use the configured Core model callback after application evidence filtering.

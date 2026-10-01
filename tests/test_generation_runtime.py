@@ -4,12 +4,35 @@ import asyncio
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 from knowgrain.config import Settings
 from knowgrain.lightrag_runtime import LightRAGRuntime
 
 
 class GenerationRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retrieval_binds_stored_parent_and_rejects_unverified_chunks(self):
+        revision_id = uuid4()
+        query = AsyncMock(return_value={"status": "success", "data": {"chunks": [
+            {"chunk_id": "valid", "content": "original", "file_path": "same.txt",
+             "source_revision_id": str(uuid4())},
+            {"chunk_id": "missing", "content": "original", "file_path": "same.txt"},
+            {"chunk_id": "changed", "content": "invented", "file_path": "same.txt"},
+            {"chunk_id": "invalid", "content": "original", "file_path": "same.txt"},
+        ]}})
+        storage = AsyncMock(return_value=[
+            {"full_doc_id": str(revision_id), "content": "original"}, None,
+            {"full_doc_id": str(revision_id), "content": "original"},
+            {"full_doc_id": "not-a-revision", "content": "original"},
+        ])
+        runtime = LightRAGRuntime(Settings(_env_file=None))
+        runtime._rag = SimpleNamespace(aquery_data=query,
+                                      text_chunks=SimpleNamespace(get_by_ids=storage))
+        result = await runtime.retrieve("topic")
+        self.assertEqual(len(result["data"]["chunks"]), 1)
+        self.assertEqual(result["data"]["chunks"][0]["source_revision_id"], str(revision_id))
+        storage.assert_awaited_once_with(["valid", "missing", "changed", "invalid"])
+
     async def test_close_drains_cancelled_real_queue_before_storage_finalization(self):
         from lightrag.llm_roles import _RoleLLMMixin
 

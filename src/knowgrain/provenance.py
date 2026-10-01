@@ -46,7 +46,7 @@ class ProvenanceService:
     async def collect(self, raw: dict) -> tuple[Evidence, ...]:
         """Filter retrieval output, then prove bounded quotes against current files."""
         chunks = self._candidate_chunks(raw)
-        candidates: list[tuple[str, str, str]] = []
+        candidates: list[tuple[str, str, str, UUID | None]] = []
         for chunk in chunks:
             if not isinstance(chunk, dict):
                 continue
@@ -73,29 +73,42 @@ class ProvenanceService:
                 chunk_id.encode("utf-8")
             except UnicodeEncodeError:
                 continue
-            candidates.append((path, chunk_id, content))
+            revision_id = None
+            if "source_revision_id" in chunk:
+                try:
+                    revision_id = UUID(chunk["source_revision_id"])
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            candidates.append((path, chunk_id, content, revision_id))
 
         if not candidates:
             raise self._unavailable()
 
         eligible_by_path = await self.repository.eligible_by_paths(
-            list(dict.fromkeys(path for path, _, _ in candidates))
+            list(dict.fromkeys(path for path, _, _, identity in candidates if identity is None))
         )
-        loaded: dict[str, _VerifiedOriginal | None] = {}
+        revision_ids = list(dict.fromkeys(
+            identity for _, _, _, identity in candidates if identity is not None
+        ))[:_MAX_EVIDENCE_ITEMS]
+        eligible_by_id = await self.repository.eligible_by_ids(revision_ids) if revision_ids else {}
+        loaded: dict[UUID, _VerifiedOriginal | None] = {}
         remaining_original_bytes = _MAX_ORIGINAL_BYTES
         evidence: list[Evidence] = []
         evidence_ids: set[UUID] = set()
         total_excerpt_chars = 0
 
-        for path, chunk_id, chunk_text in candidates:
+        for path, chunk_id, chunk_text, revision_id in candidates:
             if len(evidence) >= _MAX_EVIDENCE_ITEMS:
                 break
-            eligible = eligible_by_path.get(path)
+            eligible = (
+                eligible_by_id.get(revision_id)
+                if revision_id is not None else eligible_by_path.get(path)
+            )
             if eligible is None:
                 continue
 
-            original = loaded.get(path)
-            if path not in loaded:
+            original = loaded.get(eligible.revision_id)
+            if eligible.revision_id not in loaded:
                 original, consumed = await asyncio.to_thread(
                     self._load_verified_original,
                     self.vault,
@@ -103,7 +116,7 @@ class ProvenanceService:
                     remaining_original_bytes,
                 )
                 remaining_original_bytes -= consumed
-                loaded[path] = original
+                loaded[eligible.revision_id] = original
             if original is None:
                 continue
 
