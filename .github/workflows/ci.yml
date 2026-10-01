@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: knowgrain
+      POSTGRES_PASSWORD: knowgrain-local
+      POSTGRES_DATABASE: knowgrain_test
+      KNOWGRAIN_POSTGRES_DB: knowgrain_test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: knowgrain
+          POSTGRES_PASSWORD: knowgrain-local
+          POSTGRES_DB: knowgrain_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U knowgrain -d knowgrain_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Apply database migrations
+        run: uv run alembic upgrade head
+
+      - name: Check Python compilation
+        run: uv run python -m compileall -q src tests
+
+      - name: Run unit tests
+        run: uv run python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run PostgreSQL integration tests
+        env:
+          KNOWGRAIN_TEST_DATABASE: knowgrain_test
+          KNOWGRAIN_TEST_POSTGRES_PORT: "5432"
+        run: uv run python -m unittest discover -s tests -p '*_postgres.py' -v
+
+      - name: Check migration model parity
+        run: uv run alembic check
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install locked Web dependencies
+        run: npm ci --prefix apps/web
+
+      - name: Typecheck and build Web
+        run: npm run build --prefix apps/web

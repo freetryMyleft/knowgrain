@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e9edf2">
+  <title>Knowgrain · macOS 风格交互草图</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #e9edf2;
+      --window: #f8f9fb;
+      --surface: #ffffff;
+      --sidebar: #edf0f4;
+      --sidebar-deep: #e7ebf0;
+      --ink: #1f2733;
+      --muted: #6f7885;
+      --faint: #949ca8;
+      --line: #dce1e8;
+      --accent: #5265c9;
+      --accent-weak: #e7ebff;
+      --accent-ink: #3449b6;
+      --teal: #288d7f;
+      --teal-weak: #e1f3ef;
+      --amber: #b97e32;
+      --amber-weak: #fff2db;
+      --shadow: 0 28px 80px rgba(37, 48, 69, .16), 0 6px 22px rgba(37, 48, 69, .08);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { min-width: 320px; }
+    body { margin: 0; background: radial-gradient(circle at 14% 9%, #f8f9fc 0, transparent 31%), var(--page); color: var(--ink); }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, [contenteditable]:focus-visible { outline: 3px solid rgba(82,101,201,.42); outline-offset: 2px; }
+    svg { width: 18px; height: 18px; flex: none; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-sm { width: 15px; height: 15px; }
+    .showcase { max-width: 1600px; margin: auto; padding: 34px clamp(16px, 3.4vw, 58px) 48px; }
+    .showcase-head { display: flex; align-items: end; justify-content: space-between; gap: 28px; margin-bottom: 18px; }
+    .eyebrow { color: var(--accent-ink); font-size: 11px; letter-spacing: .18em; font-weight: 800; }
+    h1 { margin: 9px 0 0; font-size: clamp(26px, 2.5vw, 38px); letter-spacing: -.055em; line-height: 1.14; font-weight: 700; }
+    .switcher { display: flex; padding: 4px; border-radius: 12px; border: 1px solid #d7dce4; background: rgba(255,255,255,.6); box-shadow: 0 2px 8px rgba(57,67,90,.05); white-space: nowrap; }
+    .switcher button { border: 0; background: transparent; color: #616a78; padding: 9px 14px; border-radius: 9px; font-size: 13px; font-weight: 650; transition: background .18s, color .18s, box-shadow .18s; }
+    .switcher button[aria-selected="true"] { color: var(--ink); background: white; box-shadow: 0 2px 7px rgba(35,48,66,.13); }
+    .concept-copy { min-height: 40px; margin: 0 0 18px; color: #5f6978; font-size: 14px; line-height: 1.5; }
+    .concept-copy strong { color: #28384a; }
+    .frame { height: min(790px, calc(100vh - 225px)); min-height: 610px; overflow: hidden; border: 1px solid rgba(147,156,170,.5); border-radius: 16px; background: var(--window); box-shadow: var(--shadow); }
+    .concept { display: none; height: 100%; min-height: 0; }
+    .concept.active { display: flex; flex-direction: column; }
+    .toolbar { height: 62px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 18px; border-bottom: 1px solid var(--line); background: rgba(248,249,251,.94); backdrop-filter: blur(24px); }
+    .brand { display: inline-flex; align-items: center; gap: 10px; min-width: 184px; color: #243348; font-size: 14px; font-weight: 770; letter-spacing: -.025em; }
+    .brand-mark { width: 28px; height: 28px; display: inline-grid; place-items: center; color: white; border-radius: 8px; background: linear-gradient(145deg, #7786df, #3e52b9); box-shadow: inset 0 1px 0 rgba(255,255,255,.4), 0 2px 6px rgba(68,83,177,.2); }
+    .brand-mark svg { width: 18px; height: 18px; stroke-width: 2.1; }
+    .breadcrumb { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .breadcrumb strong { color: var(--ink); font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
+    .breadcrumb .chev { color: #a8b0ba; }
+    .toolbar-spacer { flex: 1; }
+    .tool-button, .ghost-button, .pill-button, .primary-button { border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; font-size: 12px; font-weight: 650; }
+    .tool-button { width: 31px; height: 31px; color: #687488; background: transparent; border-radius: 8px; }
+    .tool-button:hover, .ghost-button:hover { background: #ebeff6; }
+    .tool-button[aria-pressed="true"] { color: var(--accent); background: var(--accent-weak); }
+    .ghost-button { color: #526070; padding: 8px 10px; border-radius: 8px; background: transparent; }
+    .primary-button { background: var(--accent); color: white; border-radius: 8px; padding: 8px 12px; box-shadow: 0 2px 5px rgba(71,84,174,.2); }
+    .primary-button:hover { background: #4357bc; }
+    .pill-button { border-color: #d9dee8; color: #5e6978; background: white; border-radius: 999px; padding: 7px 10px; }
+    .pill-button:hover { border-color: #aeb8cb; }
+    .search-trigger { display: flex; align-items: center; gap: 9px; width: min(260px, 24vw); height: 32px; padding: 0 10px; color: #8390a0; border: 1px solid #e1e5eb; border-radius: 8px; background: #eff2f6; text-align: left; font-size: 12px; }
+    .search-trigger kbd { margin-left: auto; padding: 2px 5px; border: 1px solid #dce2e9; border-radius: 4px; background: white; color: #8d97a3; font-size: 10px; }
+    .app-body { display: flex; flex: 1; min-height: 0; }
+    .sidebar { width: 218px; flex: none; display: flex; flex-direction: column; min-height: 0; padding: 17px 10px 12px; background: var(--sidebar); border-right: 1px solid #d9dfe7; }
+    .sidebar-section { margin-bottom: 17px; }
+    .section-label { display: block; padding: 0 10px 8px; color: #89929e; font-size: 10px; line-height: 1; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .nav-item { width: 100%; display: flex; align-items: center; gap: 10px; min-height: 33px; padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; color: #5e6877; font-size: 12px; font-weight: 580; text-align: left; }
+    .nav-item svg { width: 17px; height: 17px; color: #8190a4; }
+    .nav-item:hover { background: rgba(255,255,255,.53); }
+    .nav-item.selected { background: #dfe5fb; color: #394fb2; font-weight: 710; }
+    .nav-item.selected svg { color: #5266cb; }
+    .nav-count { margin-left: auto; color: #8c96a4; font-size: 11px; }
+    .sidebar-bottom { margin-top: auto; border-top: 1px solid #d9dfe7; padding: 13px 9px 1px; }
+    .sync-row { display: flex; align-items: center; gap: 7px; font-size: 11px; color: #637184; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #4faf94; box-shadow: 0 0 0 3px #d9efe8; }
+    .project-box { margin: 9px 0 17px; padding: 12px; background: rgba(255,255,255,.52); border: 1px solid #dce2e9; border-radius: 10px; }
+    .project-box strong { font-size: 12px; }
+    .project-box small { display: block; margin-top: 3px; font-size: 10px; color: #919aaa; }
+    .progress-track { height: 5px; margin-top: 9px; border-radius: 9px; background: #dce2ea; overflow: hidden; }
+    .progress-track > span { display: block; width: 72%; height: 100%; background: #6575d2; border-radius: inherit; }
+    .column-head { height: 58px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+    .column-head h2 { margin: 0; font-size: 15px; letter-spacing: -.025em; }
+    .muted { color: var(--muted); }
+    .tiny { font-size: 11px; }
+    .mini-label { color: #8d97a3; font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .line { height: 1px; background: var(--line); }
+    .inspector { width: 265px; flex: none; min-height: 0; overflow: auto; background: #fbfcfd; border-left: 1px solid var(--line); }
+    .inspector-hidden .inspector { display: none; }
+    .inspector .column-head { padding-inline: 16px; }
+    .inspector-inner { padding: 17px 17px 22px; }
+    .inspector h3 { font-size: 13px; margin: 0 0 8px; }
+    .inspector p { margin: 0; font-size: 11px; line-height: 1.6; color: #738091; }
+    .inspector-group { margin-bottom: 22px; }
+    .meta-row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #ebedf2; font-size: 11px; color: #8a94a1; }
+    .meta-row strong { color: #47576b; font-weight: 610; text-align: right; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; width: fit-content; padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; }
+    .badge.good { color: #287b6d; background: var(--teal-weak); }
+    .badge.amber { color: #a7752b; background: var(--amber-weak); }
+    .badge.blue { color: #4c5dbd; background: var(--accent-weak); }
+    .badge .status-dot { width: 5px; height: 5px; box-shadow: none; }
+    .a .file-list { width: 282px; flex: none; display: flex; flex-direction: column; min-height: 0; background: #f7f8fa; border-right: 1px solid var(--line); }
+    .file-list-scroll { overflow: auto; padding: 10px 8px 22px; }
+    .file-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 56px; padding: 10px 9px; border: 0; border-radius: 9px; background: transparent; text-align: left; color: var(--ink); }
+    .file-row:hover { background: #eef2f8; }
+    .file-row.selected { background: #e3e9fa; }
+    .file-glyph { width: 30px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 7px; color: #6576cb; background: #e8ebfb; }
+    .file-glyph.pdf { color: #c06c6d; background: #f9e8e9; }
+    .file-glyph.doc { color: #6684c3; background: #e7eefb; }
+    .file-row strong { display: block; font-size: 11px; margin: 1px 0 5px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+    .file-row small { display: block; color: #8b95a2; font-size: 10px; }
+    .file-row .row-copy { min-width: 0; flex: 1; }
+    .file-row .file-more { color: #98a3b0; width: 14px; height: 14px; }
+    .a-main { min-width: 0; flex: 1; overflow: auto; background: #fff; }
+    .document-top { padding: 26px clamp(22px, 3vw, 46px) 18px; border-bottom: 1px solid #edf0f4; }
+    .document-top .mini-label { color: #7d8cba; }
+    .document-top h2 { margin: 9px 0 7px; font-size: clamp(22px, 2.1vw, 31px); letter-spacing: -.06em; font-weight: 720; }
+    .document-top p { font-size: 12px; color: #8b95a1; margin: 0 0 14px; }
+    .doc-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+    .doc-body { padding: 26px clamp(22px, 3vw, 46px) 60px; max-width: 840px; }
+    .doc-body h3 { font-family: Georgia, "Songti SC", serif; font-size: 19px; font-weight: 600; margin: 0 0 12px; }
+    .doc-body p { margin: 0 0 14px; max-width: 660px; font-size: 12px; line-height: 1.8; color: #4a5969; }
+    .quote-block { margin: 22px 0; padding: 14px 16px; border-left: 3px solid #7886d4; border-radius: 0 9px 9px 0; background: #f5f7fd; color: #506179; font-size: 12px; line-height: 1.8; }
+    .two-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 26px; }
+    .fact-card { padding: 16px; border: 1px solid #e4e8ef; border-radius: 10px; }
+    .fact-card svg { color: #687ad0; }
+    .fact-card strong { display: block; margin: 11px 0 5px; font-size: 12px; }
+    .fact-card span { font-size: 11px; line-height: 1.6; color: #8190a0; }
+    .timeline { margin-top: 14px; }
+    .timeline-item { display: flex; gap: 9px; padding: 6px 0 10px; font-size: 11px; color: #6d7b8b; }
+    .timeline-item .step-dot { width: 15px; height: 15px; flex: none; display: grid; place-items: center; border: 1px solid #79bdab; border-radius: 50%; color: #389985; background: #e9f8f4; font-size: 9px; }
+    .timeline-item strong { display: block; color: #4b5968; font-weight: 600; }
+    .timeline-item small { display: block; color: #a0a9b3; margin-top: 2px; }
+    .suggestion { padding: 12px; border: 1px solid #e1e5ed; border-radius: 10px; background: white; }
+    .suggestion strong { display: block; font-size: 11px; margin-bottom: 4px; }
+    .suggestion p { margin-bottom: 10px; }
+    .text-link { padding: 0; color: #4b62c0; background: transparent; border: 0; font-size: 11px; font-weight: 680; }
+    .text-link:hover { text-decoration: underline; }
+    .b .sidebar { width: 215px; }
+    .graph-panel { position: relative; flex: 1; min-width: 0; overflow: hidden; background: radial-gradient(#d7deeb .7px, transparent .7px) 0 0 / 22px 22px, #f9fbfd; }
+    .graph-header { position: absolute; left: 24px; top: 21px; z-index: 2; }
+    .graph-header h2 { margin: 5px 0 4px; font-size: 22px; letter-spacing: -.04em; }
+    .graph-header p { margin: 0; font-size: 11px; color: #8a95a3; }
+    .graph-wire { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; stroke: #b7c6db; stroke-width: 1.3; }
+    .graph-wire .strong-wire { stroke: #929fda; stroke-width: 1.8; }
+    .graph-node { position: absolute; z-index: 1; min-width: 120px; max-width: 165px; display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid #d6dfeb; border-radius: 12px; background: rgba(255,255,255,.95); box-shadow: 0 8px 18px rgba(73,91,123,.1); color: #435266; text-align: left; transform: translate(-50%, -50%); transition: transform .18s, box-shadow .18s, border-color .18s; }
+    .graph-node:hover { transform: translate(-50%, -52%); box-shadow: 0 12px 23px rgba(73,91,123,.16); }
+    .graph-node.selected { border-color: #6f7ed1; box-shadow: 0 0 0 4px #e9ecfc, 0 12px 26px rgba(63,76,150,.16); }
+    .graph-node .node-icon { width: 27px; height: 27px; flex: none; display: grid; place-items: center; border-radius: 8px; background: #e9ecfb; color: #5b6cc5; }
+    .graph-node .node-icon.green { background: #e5f4ee; color: #3f9c79; }
+    .graph-node .node-icon.gold { background: #fff3dc; color: #b68a42; }
+    .graph-node .node-icon svg { width: 15px; height: 15px; }
+    .graph-node strong { display: block; color: #34435a; font-size: 11px; white-space: nowrap; }
+    .graph-node small { display: block; color: #9aa4b0; margin-top: 3px; font-size: 9px; }
+    .node-a { left: 48%; top: 47%; }.node-b { left: 24%; top: 31%; }.node-c { left: 73%; top: 28%; }.node-d { left: 24%; top: 67%; }.node-e { left: 73%; top: 68%; }.node-f { left: 49%; top: 79%; }
+    .graph-hud { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid #dfe4eb; border-radius: 11px; background: rgba(255,255,255,.93); box-shadow: 0 9px 26px rgba(54,72,105,.13); }
+    .graph-hud button { padding: 7px 10px; border: 0; border-radius: 7px; color: #697788; background: transparent; font-size: 11px; }
+    .graph-hud button.selected { color: #4a5db7; background: #edf0fc; font-weight: 700; }
+    .b-inspector-lead { padding: 14px; border: 1px solid #e4e8ef; border-radius: 11px; background: white; }
+    .b-inspector-lead h3 { font-family: Georgia, "Songti SC", serif; font-size: 18px; margin: 9px 0 7px; letter-spacing: -.03em; }
+    .relation-list { display: grid; gap: 7px; margin-top: 10px; }
+    .relation-row { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid #e8ecf1; border-radius: 8px; background: white; font-size: 10px; color: #697887; }
+    .relation-row svg { width: 14px; height: 14px; color: #6e7bd0; }
+    .relation-row strong { color: #4b5b6d; }
+    .source-mini { padding: 10px 0; border-bottom: 1px solid #e8ecf1; }
+    .source-mini strong { display: block; font-size: 11px; font-weight: 650; }
+    .source-mini span { display: block; margin-top: 4px; font-size: 10px; color: #9aa4af; }
+    .c .sidebar { width: 215px; }
+    .c .nav-item.selected { background: #e7e5f5; color: #615493; }
+    .c .nav-item.selected svg { color: #796ab6; }
+    .wiki-column { width: 230px; flex: none; min-height: 0; background: #f7f8fa; border-right: 1px solid var(--line); }
+    .wiki-list { padding: 9px 8px; }
+    .wiki-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: #607082; font-size: 11px; text-align: left; }
+    .wiki-item:hover { background: #eff1f5; }
+    .wiki-item.selected { color: #534e85; background: #eeecf8; font-weight: 720; }
+    .wiki-item svg { width: 15px; height: 15px; color: #918ab8; }
+    .wiki-item.indent { padding-left: 28px; }
+    .editor-shell { min-width: 0; flex: 1; display: flex; flex-direction: column; background: #fff; }
+    .editor-meta { display: flex; align-items: center; gap: 10px; min-height: 53px; padding: 0 clamp(20px, 3.5vw, 55px); border-bottom: 1px solid #edf0f4; font-size: 11px; color: #919baa; }
+    .editor-meta .meta-spacer { flex: 1; }
+    .editor-scroll { overflow: auto; padding: 35px clamp(24px, 4vw, 66px) 72px; }
+    .article { max-width: 720px; margin: auto; outline: none; }
+    .article-kicker { color: #8077a9; font-size: 10px; letter-spacing: .16em; font-weight: 800; }
+    .article h2 { margin: 12px 0 9px; font-family: Georgia, "Songti SC", serif; font-size: clamp(28px, 2.8vw, 39px); font-weight: 650; line-height: 1.17; letter-spacing: -.055em; }
+    .article-deck { color: #798592; font-size: 14px !important; line-height: 1.7 !important; margin-bottom: 25px !important; }
+    .article p { margin: 0 0 16px; font-size: 13px; line-height: 1.85; color: #465264; }
+    .article h3 { margin: 30px 0 11px; padding-top: 17px; border-top: 1px solid #e9ebef; font-family: Georgia, "Songti SC", serif; font-size: 20px; font-weight: 600; }
+    .article a { color: #5a66be; text-decoration: none; border-bottom: 1px solid #c7cced; }
+    .article a:hover { border-color: #5a66be; }
+    .citation { display: inline-grid; place-items: center; vertical-align: .22em; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 5px; background: #e8ebfb; color: #5365bc; font-size: 10px; font-weight: 750; }
+    .citation:hover { background: #dce1fb; }
+    .article .claim-active { background: #f5f4fc; box-shadow: 0 0 0 6px #f5f4fc; border-radius: 2px; }
+    .evidence-card { padding: 11px 12px; border: 1px solid #e6e9ef; border-radius: 10px; background: white; margin-bottom: 9px; transition: border-color .2s, box-shadow .2s; }
+    .evidence-card.active { border-color: #8d91d2; box-shadow: 0 0 0 3px #ececfa; }
+    .evidence-card .evidence-top { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+    .evidence-card .evidence-top strong { font-size: 11px; }
+    .evidence-card .evidence-top span { margin-left: auto; font-size: 9px; color: #9aa3ad; }
+    .evidence-card p { font-family: Georgia, "Songti SC", serif; color: #586577; font-size: 11px; line-height: 1.68; }
+    .evidence-card .text-link { margin-top: 8px; }
+    .inspector-note { padding: 10px; border-radius: 9px; background: #f1f3fb; color: #6a7190; font-size: 10px; line-height: 1.6; }
+    .design-foot { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 15px; color: #778291; font-size: 11px; line-height: 1.4; }
+    .design-foot strong { color: #526171; }
+    .toast { position: fixed; right: 24px; bottom: 24px; z-index: 10; max-width: min(340px, calc(100vw - 48px)); padding: 11px 15px; border-radius: 10px; background: #253146; color: #fff; font-size: 12px; box-shadow: 0 10px 25px rgba(31,42,64,.26); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .2s, transform .2s; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .palette-backdrop { position: fixed; inset: 0; z-index: 15; display: none; align-items: flex-start; justify-content: center; padding: min(20vh, 160px) 16px 16px; background: rgba(30,39,56,.28); backdrop-filter: blur(5px); }
+    .palette-backdrop.open { display: flex; }
+    .palette { width: min(560px, 100%); overflow: hidden; border: 1px solid #dce2e9; border-radius: 14px; background: #fff; box-shadow: 0 25px 70px rgba(25,35,54,.29); }
+    .palette-search { width: 100%; height: 55px; border: 0; border-bottom: 1px solid #e7eaf0; padding: 0 18px; outline: none; font-size: 15px; }
+    .palette-results { padding: 8px; }
+    .palette-results button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; color: #45536a; font-size: 12px; }
+    .palette-results button:hover, .palette-results button:focus-visible { background: #eef1fa; }
+    .palette-results svg { color: #6c7bc8; }
+    .palette-footer { display: flex; justify-content: space-between; border-top: 1px solid #edf0f4; padding: 9px 15px; color: #9aa4b0; font-size: 10px; }
+    @media (max-width: 1250px) { .a .inspector, .b .inspector, .c .inspector { display: none; } .brand { min-width: 150px; } }
+    @media (max-width: 900px) { .showcase-head { align-items: flex-start; flex-direction: column; gap: 18px; } .frame { height: 650px; } .sidebar { width: 185px !important; } .a .file-list { width: 235px; } .wiki-column { width: 195px; } .search-trigger { display: none; } .toolbar .breadcrumb { max-width: 240px; } }
+    @media (max-width: 680px) { .showcase { padding: 20px 10px 28px; } .showcase-head { padding: 0 6px; } .switcher { width: 100%; } .switcher button { flex: 1; padding-inline: 5px; font-size: 11px; } .concept-copy { padding: 0 6px; font-size: 12px; } .frame { border-radius: 11px; height: 600px; min-height: 0; } .toolbar { height: 54px; padding-inline: 11px; gap: 8px; } .brand { min-width: 0; font-size: 0; } .brand-mark { width: 27px; height: 27px; } .toolbar .breadcrumb { font-size: 11px; } .toolbar .primary-button { padding: 7px; font-size: 0; } .toolbar .primary-button svg { width: 16px; height: 16px; } .sidebar, .a .file-list, .c .wiki-column { display: none; } .document-top { padding: 22px; } .doc-body { padding: 23px; } .two-facts { grid-template-columns: 1fr; } .graph-header h2 { font-size: 17px; } .graph-node { min-width: auto; padding: 8px; } .graph-node strong { font-size: 10px; } .graph-node small { display: none; } .graph-node .node-icon { display: none; } .editor-scroll { padding: 28px 21px; } .design-foot { padding: 0 5px; flex-direction: column; align-items: flex-start; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-grain" viewBox="0 0 24 24"><path d="M12 21V9m0 7c-4 0-7-2.4-7-6 4 0 7 2.4 7 6Zm0-4c4 0 7-2.4 7-6-4 0-7 2.4-7 6ZM12 7c-2.6 0-4-1.7-4-4 2.6 0 4 1.7 4 4Zm0 0c2.6 0 4-1.7 4-4-2.6 0-4 1.7-4 4Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.7"/><path d="m16 16 4.4 4.4"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 2h8l5 5v15H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/><path d="M14 2v6h5M8 13h7M8 17h7"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5C9.5 3.3 6 3 3 4v15c3-1 6.5-.7 9 1 2.5-1.7 6-2 9-1V4c-3-1-6.5-.7-9 1Z"/><path d="M12 5v15"/></symbol>
+    <symbol id="i-graph" viewBox="0 0 24 24"><circle cx="4" cy="12" r="2"/><circle cx="13" cy="5" r="2"/><circle cx="20" cy="15" r="2"/><circle cx="10" cy="20" r="2"/><path d="m5.6 10.8 5.7-4.6m3.1.4 4.2 6.7m-.3 3.1-6.5 2.8m-2.4-.6-4.1-5.1"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2Zm7 15 .6 1.7L21 19l-1.4.3L19 21l-.6-1.7L17 19l1.4-.3L19 17Z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4M8 16H6a4 4 0 0 1 0-8h4m4 0h4a4 4 0 0 1 0 8h-4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 17V4m-4 4 4-4 4 4M4 17v3h16v-3"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M4 4h16v13H9l-5 4V4Z"/><path d="M8 9h8M8 13h5"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+  </svg>
+
+  <div class="showcase">
+    <header class="showcase-head">
+      <div><div class="eyebrow">KNOWGRAIN / UI EXPLORATION</div><h1>让知识看得见来处</h1></div>
+      <div class="switcher" role="tablist" aria-label="切换界面方案">
+        <button type="button" role="tab" aria-selected="true" aria-controls="concept-a" data-view="a">A · 资料工作台</button>
+        <button type="button" role="tab" aria-selected="false" aria-controls="concept-b" data-view="b">B · 知识地图</button>
+        <button type="button" role="tab" aria-selected="false" aria-controls="concept-c" data-view="c">C · Wiki 写作</button>
+      </div>
+    </header>
+    <p class="concept-copy" id="concept-copy"><strong>资料工作台</strong>以来源和处理状态为中心：适合批量导入、核对解析结果、决定哪些知识值得写成页面。</p>
+
+    <main class="frame" aria-label="Knowgrain 交互草图预览">
+      <section id="concept-a" class="concept a active" aria-label="方案 A：资料工作台">
+        <div class="toolbar">
+          <div class="brand"><span class="brand-mark"><svg><use href="#i-grain"/></svg></span> Knowgrain</div>
+          <div class="breadcrumb"><strong>资料库</strong><svg class="icon-sm chev"><use href="#i-chevron"/></svg><span>项目资料</span></div>
+          <div class="toolbar-spacer"></div>
+          <button class="search-trigger" type="button" data-command aria-label="搜索资料"><svg class="icon-sm"><use href="#i-search"/></svg>搜索资料与页面 <kbd>⌘ K</kbd></button>
+          <button class="tool-button" type="button" data-toggle-inspector aria-label="切换检查器" aria-pressed="true"><svg><use href="#i-panel"/></svg></button>
+          <button class="primary-button" type="button" data-toast="已打开导入流程（草图示意）"><svg class="icon-sm"><use href="#i-upload"/></svg>导入资料</button>
+        </div>
+        <div class="app-body">
+          <nav class="sidebar" aria-label="资料工作台导航">
+            <div class="sidebar-section"><span class="section-label">工作区</span>
+              <button class="nav-item selected" type="button"><svg><use href="#i-folder"/></svg>资料库<span class="nav-count">24</span></button>
+              <button class="nav-item" type="button" data-switch="c"><svg><use href="#i-book"/></svg>Wiki 页面<span class="nav-count">12</span></button>
+              <button class="nav-item" type="button" data-switch="b"><svg><use href="#i-graph"/></svg>知识地图</button>
+              <button class="nav-item" type="button" data-toast="已切换到问答（草图示意）"><svg><use href="#i-message"/></svg>问答</button>
+            </div>
+            <div class="sidebar-section"><span class="section-label">筛选</span>
+              <button class="nav-item" type="button"><svg><use href="#i-check"/></svg>已索引<span class="nav-count">21</span></button>
+              <button class="nav-item" type="button"><svg><use href="#i-clock"/></svg>处理中<span class="nav-count">3</span></button>
+              <button class="nav-item" type="button"><svg><use href="#i-spark"/></svg>可生成页面<span class="nav-count">8</span></button>
+            </div>
+            <div class="sidebar-bottom"><div class="sync-row"><span class="status-dot"></span>Vault 已连接 · 刚刚同步</div><div class="project-box"><strong>正在整理资料</strong><small>18 / 24 个文件已完成解析</small><div class="progress-track"><span></span></div></div></div>
+          </nav>
+          <div class="file-list">
+            <div class="column-head"><h2>来源资料</h2><button class="tool-button" type="button" data-toast="新建来源文件夹（草图示意）" aria-label="新建来源文件夹"><svg class="icon-sm"><use href="#i-plus"/></svg></button></div>
+            <div class="file-list-scroll">
+              <span class="section-label">最近使用</span>
+              <button class="file-row selected" type="button" data-file="LightRAG 架构笔记"><span class="file-glyph"><svg><use href="#i-file"/></svg></span><span class="row-copy"><strong>LightRAG 架构笔记</strong><small>Markdown · 已索引 · 今天</small></span></button>
+              <button class="file-row" type="button" data-file="Obsidian 数据存储说明"><span class="file-glyph pdf"><svg><use href="#i-file"/></svg></span><span class="row-copy"><strong>Obsidian 数据存储说明</strong><small>PDF · 已索引 · 昨天</small></span></button>
+              <button class="file-row" type="button" data-file="知识库需求草案"><span class="file-glyph doc"><svg><use href="#i-file"/></svg></span><span class="row-copy"><strong>知识库需求草案</strong><small>Word · 处理中</small></span></button>
+              <span class="section-label" style="margin-top:22px">项目文件夹</span>
+              <button class="file-row" type="button" data-file="产品目标与范围"><span class="file-glyph"><svg><use href="#i-file"/></svg></span><span class="row-copy"><strong>产品目标与范围</strong><small>Markdown · 已索引</small></span></button>
+              <button class="file-row" type="button" data-file="引用规范"><span class="file-glyph pdf"><svg><use href="#i-file"/></svg></span><span class="row-copy"><strong>引用规范</strong><small>PDF · 已索引</small></span></button>
+            </div>
+          </div>
+          <article class="a-main">
+            <div class="document-top"><span class="mini-label">来源 / MARKDOWN</span><h2 data-file-title>LightRAG 架构笔记</h2><p>Sources/Files/source-6f51b786-lightrag.md · 最后修改于今天 10:42</p><div class="doc-actions"><span class="badge good"><span class="status-dot"></span>索引已更新</span><span class="badge blue">发现 16 个实体</span><button class="pill-button" type="button" data-switch="c"><svg class="icon-sm"><use href="#i-spark"/></svg>生成 Wiki 草稿</button></div></div>
+            <div class="doc-body"><span class="mini-label">原文预览</span><h3 style="margin-top:10px">检索不止是查找相似段落</h3><p>LightRAG 在文档入库时提取实体和关系，并保留文本块及对应的向量索引。用户提问后，系统能根据问题选取局部实体、跨文档关系或原文片段，汇总为回答上下文。</p><div class="quote-block">“图谱提供事物之间的关系，原文块提供回答所需的具体证据。”<br><span class="muted tiny">— 本资料第 2 节 · 可作为 Wiki 声明的引用</span></div><p>页面生成时，每条事实都应带上来源。资料更新后，对应证据也要显示版本状态，避免旧索引被误用。</p><div class="two-facts"><div class="fact-card"><svg><use href="#i-graph"/></svg><strong>实体与关系</strong><span>已识别 16 个实体、21 条关系，可用于知识地图与跨文档问答。</span></div><div class="fact-card"><svg><use href="#i-link"/></svg><strong>可追溯引用</strong><span>7 个文本块保留文件路径，可从答案跳回当前来源。</span></div></div></div>
+          </article>
+          <aside class="inspector" aria-label="资料检查器"><div class="column-head"><h2>检查器</h2><svg class="icon-sm muted"><use href="#i-more"/></svg></div><div class="inspector-inner"><div class="inspector-group"><span class="mini-label">处理状态</span><div class="timeline"><div class="timeline-item"><span class="step-dot">✓</span><div><strong>已读取文件</strong><small>10:42 · SHA-256 已记录</small></div></div><div class="timeline-item"><span class="step-dot">✓</span><div><strong>已提取知识</strong><small>16 个实体 · 21 条关系</small></div></div><div class="timeline-item"><span class="step-dot">✓</span><div><strong>证据可检索</strong><small>7 个文本块</small></div></div></div></div><div class="inspector-group"><span class="mini-label">可生成的页面</span><div class="suggestion" style="margin-top:10px"><strong>图谱与向量的双路检索</strong><p>已有 4 条跨文档证据。适合作为 Wiki 主题。</p><button class="text-link" type="button" data-switch="c">查看草稿 <span aria-hidden="true">→</span></button></div></div><div class="inspector-group"><span class="mini-label">文件信息</span><div class="meta-row"><span>所在位置</span><strong>Sources/Files</strong></div><div class="meta-row"><span>内容版本</span><strong>第 3 版</strong></div><div class="meta-row"><span>引用状态</span><strong>当前版本</strong></div></div></div></aside>
+        </div>
+      </section>
+
+      <section id="concept-b" class="concept b" aria-label="方案 B：知识地图">
+        <div class="toolbar"><div class="brand"><span class="brand-mark"><svg><use href="#i-grain"/></svg></span> Knowgrain</div><div class="breadcrumb"><strong>知识地图</strong><svg class="icon-sm chev"><use href="#i-chevron"/></svg><span>项目知识</span></div><div class="toolbar-spacer"></div><button class="search-trigger" type="button" data-command><svg class="icon-sm"><use href="#i-search"/></svg>搜索实体或关系 <kbd>⌘ K</kbd></button><button class="tool-button" type="button" data-toggle-inspector aria-label="切换检查器" aria-pressed="true"><svg><use href="#i-panel"/></svg></button><button class="primary-button" type="button" data-toast="已打开提问框（草图示意）"><svg class="icon-sm"><use href="#i-spark"/></svg>基于地图提问</button></div>
+        <div class="app-body"><nav class="sidebar" aria-label="知识地图导航"><div class="sidebar-section"><span class="section-label">工作区</span><button class="nav-item" type="button" data-switch="a"><svg><use href="#i-folder"/></svg>资料库</button><button class="nav-item" type="button" data-switch="c"><svg><use href="#i-book"/></svg>Wiki 页面</button><button class="nav-item selected" type="button"><svg><use href="#i-graph"/></svg>知识地图</button><button class="nav-item" type="button" data-toast="已切换到问答（草图示意）"><svg><use href="#i-message"/></svg>问答</button></div><div class="sidebar-section"><span class="section-label">地图视图</span><button class="nav-item selected" type="button">全部关系<span class="nav-count">21</span></button><button class="nav-item" type="button" data-toast="已筛选：高关联实体（草图示意）">高关联实体</button><button class="nav-item" type="button" data-toast="已筛选：待核实关系（草图示意）">待核实关系<span class="nav-count">3</span></button></div><div class="sidebar-bottom"><div class="sync-row"><span class="status-dot"></span>来自 24 份资料</div><div class="project-box"><strong>探索提示</strong><small>点击节点，查看关系和原始证据。</small></div></div></nav>
+          <div class="graph-panel"><div class="graph-header"><span class="mini-label">知识网络 / 24 份资料</span><h2>知识如何连接</h2><p>选中一个主题，沿关系回到来源。</p></div>
+            <svg class="graph-wire" viewBox="0 0 800 610" preserveAspectRatio="none" aria-hidden="true"><path class="strong-wire" d="M384 287 192 189M384 287 584 171M384 287 192 409M384 287 584 414M384 287 392 482"/><path d="M192 189 584 171M192 409 392 482M584 414 392 482"/></svg>
+            <button class="graph-node node-a selected" type="button" data-node="LightRAG" data-summary="结合实体关系图与文本块向量，为问题找到结构化上下文及原始证据。" data-sources="7"><span class="node-icon"><svg><use href="#i-graph"/></svg></span><span><strong>LightRAG</strong><small>核心框架 · 7 个来源</small></span></button>
+            <button class="graph-node node-b" type="button" data-node="知识图谱" data-summary="由资料中的实体和关系形成，适合观察跨文档联系。" data-sources="5"><span class="node-icon gold"><svg><use href="#i-graph"/></svg></span><span><strong>知识图谱</strong><small>概念 · 5 个来源</small></span></button>
+            <button class="graph-node node-c" type="button" data-node="向量检索" data-summary="通过语义相似度定位文本块、实体和关系。" data-sources="4"><span class="node-icon green"><svg><use href="#i-search"/></svg></span><span><strong>向量检索</strong><small>方法 · 4 个来源</small></span></button>
+            <button class="graph-node node-d" type="button" data-node="Obsidian Vault" data-summary="Markdown 文件夹，保存原始资料和已审阅 Wiki 页面。" data-sources="3"><span class="node-icon"><svg><use href="#i-folder"/></svg></span><span><strong>Obsidian Vault</strong><small>存储 · 3 个来源</small></span></button>
+            <button class="graph-node node-e" type="button" data-node="证据引用" data-summary="把检索块与来源版本关联，让答案可以回到原文。" data-sources="6"><span class="node-icon gold"><svg><use href="#i-link"/></svg></span><span><strong>证据引用</strong><small>机制 · 6 个来源</small></span></button>
+            <button class="graph-node node-f" type="button" data-node="Wiki 页面" data-summary="可人工审阅和编辑的 Markdown 页面，链接到具体证据。" data-sources="2"><span class="node-icon green"><svg><use href="#i-book"/></svg></span><span><strong>Wiki 页面</strong><small>内容 · 2 个来源</small></span></button>
+            <div class="graph-hud" role="group" aria-label="地图筛选"><button class="selected" type="button" data-toast="显示全部节点">全部</button><button type="button" data-toast="仅显示已审阅节点（草图示意）">已审阅</button><button type="button" data-toast="仅显示来源节点（草图示意）">来源</button></div>
+          </div>
+          <aside class="inspector" aria-label="知识地图检查器"><div class="column-head"><h2>实体检查器</h2><svg class="icon-sm muted"><use href="#i-more"/></svg></div><div class="inspector-inner"><div class="b-inspector-lead"><span class="badge blue">已关联 Wiki</span><h3 id="node-detail-title">LightRAG</h3><p id="node-detail-summary">结合实体关系图与文本块向量，为问题找到结构化上下文及原始证据。</p></div><div class="inspector-group" style="margin-top:22px"><span class="mini-label">主要关系</span><div class="relation-list"><div class="relation-row"><svg><use href="#i-link"/></svg>使用 <strong>知识图谱</strong></div><div class="relation-row"><svg><use href="#i-link"/></svg>结合 <strong>向量检索</strong></div><div class="relation-row"><svg><use href="#i-link"/></svg>生成 <strong>Wiki 页面</strong></div></div></div><div class="inspector-group"><span class="mini-label">来源依据 <span id="node-source-count">7</span></span><div class="source-mini"><strong>LightRAG 架构笔记</strong><span>Markdown · 当前版本</span></div><div class="source-mini"><strong>知识库需求草案</strong><span>Word · 待完成索引</span></div><button class="text-link" type="button" data-switch="a" style="margin-top:12px">查看来源资料 →</button></div></div></aside>
+        </div>
+      </section>
+
+      <section id="concept-c" class="concept c" aria-label="方案 C：Wiki 写作">
+        <div class="toolbar"><div class="brand"><span class="brand-mark"><svg><use href="#i-grain"/></svg></span> Knowgrain</div><div class="breadcrumb"><strong>Wiki</strong><svg class="icon-sm chev"><use href="#i-chevron"/></svg><span>图谱与向量的双路检索</span></div><div class="toolbar-spacer"></div><button class="search-trigger" type="button" data-command><svg class="icon-sm"><use href="#i-search"/></svg>搜索页面与证据 <kbd>⌘ K</kbd></button><button class="tool-button" type="button" data-toggle-inspector aria-label="切换证据检查器" aria-pressed="true"><svg><use href="#i-panel"/></svg></button><button class="ghost-button" type="button" data-toast="草稿已保存（仅为交互示意）">保存草稿</button><button class="primary-button" type="button" id="review-button"><svg class="icon-sm"><use href="#i-check"/></svg><span id="review-label">标记已审阅</span></button></div>
+        <div class="app-body"><nav class="sidebar" aria-label="Wiki 导航"><div class="sidebar-section"><span class="section-label">工作区</span><button class="nav-item" type="button" data-switch="a"><svg><use href="#i-folder"/></svg>资料库</button><button class="nav-item selected" type="button"><svg><use href="#i-book"/></svg>Wiki 页面</button><button class="nav-item" type="button" data-switch="b"><svg><use href="#i-graph"/></svg>知识地图</button><button class="nav-item" type="button" data-toast="已切换到问答（草图示意）"><svg><use href="#i-message"/></svg>问答</button></div><div class="sidebar-section"><span class="section-label">我的页面</span><button class="nav-item" type="button"><svg><use href="#i-clock"/></svg>待审阅<span class="nav-count">4</span></button><button class="nav-item" type="button"><svg><use href="#i-check"/></svg>已审阅<span class="nav-count">8</span></button></div><div class="sidebar-bottom"><div class="sync-row"><span class="status-dot"></span>Markdown 已同步到 Vault</div><div class="project-box"><strong>审阅中的页面</strong><small>事实旁的数字可定位原文证据。</small></div></div></nav>
+          <div class="wiki-column"><div class="column-head"><h2>页面目录</h2><button class="tool-button" type="button" data-toast="新建 Wiki 页面（草图示意）" aria-label="新建页面"><svg class="icon-sm"><use href="#i-plus"/></svg></button></div><div class="wiki-list"><span class="section-label">知识工程</span><button class="wiki-item" type="button"><svg><use href="#i-book"/></svg>检索增强生成</button><button class="wiki-item selected indent" type="button"><svg><use href="#i-file"/></svg>图谱与向量的双路检索</button><button class="wiki-item indent" type="button" data-toast="切换到知识图谱页面（草图示意）"><svg><use href="#i-file"/></svg>知识图谱</button><button class="wiki-item indent" type="button" data-toast="切换到来源追溯页面（草图示意）"><svg><use href="#i-file"/></svg>来源追溯</button><span class="section-label" style="margin-top:22px">产品设计</span><button class="wiki-item" type="button" data-toast="切换到 Vault 同步页面（草图示意）"><svg><use href="#i-file"/></svg>Vault 同步策略</button></div></div>
+          <div class="editor-shell"><div class="editor-meta"><span class="badge amber" id="review-state">待审阅</span><span>由 3 份资料生成</span><span class="meta-spacer"></span><span>最后编辑于今天 11:08</span></div><div class="editor-scroll"><article class="article" contenteditable="true" spellcheck="false" aria-label="Wiki 草稿内容，可直接编辑"><div class="article-kicker">知识工程 / 检索策略</div><h2>图谱与向量的双路检索</h2><p class="article-deck">把“概念之间的关系”和“资料中的原句”放在同一个回答里。</p><p id="claim-1">LightRAG 会从文档中提取实体与关系，形成可用于局部和跨文档检索的知识图谱。<button class="citation" type="button" data-evidence="1" aria-label="查看证据 1">1</button> 同时，文本块保留向量索引和来源路径，便于返回具体原文。<button class="citation" type="button" data-evidence="2" aria-label="查看证据 2">2</button></p><h3>为什么需要两条检索路径</h3><p id="claim-2">当问题问的是“某个概念是什么”，实体邻域更容易提供聚焦的上下文；当问题问的是“这些设计如何相互影响”，关系信息能补足单个文本块缺少的连接。<button class="citation" type="button" data-evidence="1" aria-label="查看证据 1">1</button></p><p>这篇页面关联到 <a href="#" data-switch="b" contenteditable="false">[[知识图谱]]</a>、<a href="#" data-switch="b" contenteditable="false">[[向量检索]]</a> 与 <a href="#" data-switch="a" contenteditable="false">[[来源追溯]]</a>。审阅时可沿链接检查概念，也可点引用查看原始资料。</p><h3>需要人工确认</h3><p>模型整理出的关系可能遗漏限定条件。发布前应核对右侧证据，并确认文字没有超出原文支持的范围。</p></article></div></div>
+          <aside class="inspector" aria-label="证据检查器"><div class="column-head"><h2>证据与反链</h2><svg class="icon-sm muted"><use href="#i-more"/></svg></div><div class="inspector-inner"><div class="inspector-group"><span class="mini-label">当前页面引用</span><div class="evidence-card active" data-evidence-card="1" style="margin-top:10px"><div class="evidence-top"><span class="badge blue">1</span><strong>LightRAG 架构笔记</strong><span>当前版</span></div><p>“提取实体与关系，并结合文本块进行多种模式的检索。”</p><button class="text-link" type="button" data-switch="a">打开原文 →</button></div><div class="evidence-card" data-evidence-card="2"><div class="evidence-top"><span class="badge blue">2</span><strong>系统设计说明</strong><span>当前版</span></div><p>“文本块、实体和关系分别保留向量信息与来源路径。”</p><button class="text-link" type="button" data-switch="a">打开原文 →</button></div></div><div class="inspector-group"><span class="mini-label">引用此页的页面</span><div class="relation-list"><div class="relation-row"><svg><use href="#i-link"/></svg><strong>检索增强生成</strong></div><div class="relation-row"><svg><use href="#i-link"/></svg><strong>知识库架构</strong></div></div></div><div class="inspector-note">审阅后，此页不会被下一次自动生成直接覆盖；更新会以差异提案呈现。</div></div></aside>
+        </div>
+      </section>
+    </main>
+    <footer class="design-foot"><span><strong>三种布局，同一产品：</strong>资料管理 → 关系探索 → 有证据的写作与问答。</span><span>交互提示：点击方案、图节点或引用；按 <strong>⌘ / Ctrl + K</strong> 打开搜索。</span></footer>
+  </div>
+
+  <div class="palette-backdrop" id="palette-backdrop" role="presentation"><div class="palette" role="dialog" aria-modal="true" aria-label="快速搜索"><input class="palette-search" id="palette-input" placeholder="搜索资料、Wiki 页面或知识实体…" autocomplete="off"><div class="palette-results"><button type="button" data-switch="a"><svg><use href="#i-folder"/></svg>来源资料：LightRAG 架构笔记</button><button type="button" data-switch="c"><svg><use href="#i-book"/></svg>Wiki：图谱与向量的双路检索</button><button type="button" data-switch="b"><svg><use href="#i-graph"/></svg>知识地图：LightRAG</button></div><div class="palette-footer"><span>↑ ↓ 浏览 · Enter 打开</span><span>Esc 关闭</span></div></div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script>
+    (() => {
+      const descriptions = {
+        a: '<strong>资料工作台</strong>以来源和处理状态为中心：适合批量导入、核对解析结果、决定哪些知识值得写成页面。',
+        b: '<strong>知识地图</strong>把 LightRAG 的实体与关系变成可探索的界面：适合发现主题、跨文档联系与缺失的 Wiki 页面。',
+        c: '<strong>Wiki 写作</strong>让正文与证据并排：适合审阅生成草稿、编辑 Markdown，并追查每段结论来自哪里。'
+      };
+      const views = [...document.querySelectorAll('.concept')];
+      const tabs = [...document.querySelectorAll('[data-view]')];
+      const palette = document.getElementById('palette-backdrop');
+      const paletteInput = document.getElementById('palette-input');
+      const toast = document.getElementById('toast');
+      let toastTimer;
+      function activeView() { return document.querySelector('.concept.active'); }
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 2500);
+      }
+      function switchView(id) {
+        if (!descriptions[id]) return;
+        views.forEach(view => view.classList.toggle('active', view.id === `concept-${id}`));
+        tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.view === id)));
+        document.getElementById('concept-copy').innerHTML = descriptions[id];
+        palette.classList.remove('open');
+        history.replaceState(null, '', `#${id}`);
+      }
+      tabs.forEach(tab => tab.addEventListener('click', () => switchView(tab.dataset.view)));
+      document.querySelectorAll('[data-switch]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); switchView(button.dataset.switch); }));
+      document.querySelectorAll('[data-toast]').forEach(button => button.addEventListener('click', () => showToast(button.dataset.toast)));
+      document.querySelectorAll('[data-toggle-inspector]').forEach(button => button.addEventListener('click', () => {
+        const view = activeView();
+        const hidden = view.classList.toggle('inspector-hidden');
+        button.setAttribute('aria-pressed', String(!hidden));
+      }));
+      document.querySelectorAll('.file-row').forEach(row => row.addEventListener('click', () => {
+        document.querySelectorAll('.file-row').forEach(item => item.classList.remove('selected'));
+        row.classList.add('selected');
+        document.querySelector('[data-file-title]').textContent = row.dataset.file;
+      }));
+      document.querySelectorAll('.graph-node').forEach(node => node.addEventListener('click', () => {
+        document.querySelectorAll('.graph-node').forEach(item => item.classList.remove('selected'));
+        node.classList.add('selected');
+        document.getElementById('node-detail-title').textContent = node.dataset.node;
+        document.getElementById('node-detail-summary').textContent = node.dataset.summary;
+        document.getElementById('node-source-count').textContent = node.dataset.sources;
+      }));
+      document.querySelectorAll('[data-evidence]').forEach(button => button.addEventListener('click', event => {
+        event.stopPropagation();
+        const id = button.dataset.evidence;
+        document.querySelectorAll('.evidence-card').forEach(card => card.classList.toggle('active', card.dataset.evidenceCard === id));
+        document.querySelectorAll('.article p').forEach(paragraph => paragraph.classList.remove('claim-active'));
+        button.closest('p')?.classList.add('claim-active');
+        activeView().classList.remove('inspector-hidden');
+        activeView().querySelector('[data-toggle-inspector]')?.setAttribute('aria-pressed', 'true');
+        showToast(`已定位证据 ${id}`);
+      }));
+      document.getElementById('review-button').addEventListener('click', event => {
+        const state = document.getElementById('review-state');
+        const reviewed = state.textContent === '已审阅';
+        state.textContent = reviewed ? '待审阅' : '已审阅';
+        state.className = `badge ${reviewed ? 'amber' : 'good'}`;
+        document.getElementById('review-label').textContent = reviewed ? '标记已审阅' : '撤销审阅';
+        showToast(reviewed ? '已撤销审阅（草图示意）' : '页面已标记为已审阅（草图示意）');
+      });
+      function openPalette() { palette.classList.add('open'); paletteInput.focus(); }
+      document.querySelectorAll('[data-command]').forEach(button => button.addEventListener('click', openPalette));
+      palette.addEventListener('click', event => { if (event.target === palette) palette.classList.remove('open'); });
+      document.addEventListener('keydown', event => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openPalette(); }
+        if (event.key === 'Escape') palette.classList.remove('open');
+      });
+      paletteInput.addEventListener('input', () => {
+        const query = paletteInput.value.trim().toLowerCase();
+        document.querySelectorAll('.palette-results button').forEach(button => { button.hidden = !button.textContent.toLowerCase().includes(query); });
+      });
+      paletteInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') document.querySelector('.palette-results button:not([hidden])')?.click();
+        if (event.key === 'ArrowDown') document.querySelector('.palette-results button:not([hidden])')?.focus();
+      });
+      const initial = location.hash.slice(1);
+      if (descriptions[initial]) switchView(initial);
+    })();
+  </script>
+</body>
+</html>

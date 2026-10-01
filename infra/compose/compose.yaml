@@ -1,0 +1,24 @@
+name: knowgrain
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-knowgrain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-knowgrain-local}
+      POSTGRES_DB: ${KNOWGRAIN_POSTGRES_DB:-knowgrain}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 uses PGDATA=/var/lib/postgresql/18/docker.
+      - knowgrain-postgres:/var/lib/postgresql
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/10-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-knowgrain} -d ${KNOWGRAIN_POSTGRES_DB:-knowgrain}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  knowgrain-postgres:

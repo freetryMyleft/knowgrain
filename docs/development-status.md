@@ -1,0 +1,42 @@
+# Development status
+
+Full objective: M0 through M6 in architecture-and-development-plan.md and the attached goal objective. No milestone completion is inferred from a scaffold or static check.
+
+## M0
+
+- Implemented: locked Python dependencies, LightRAG 1.5.7 lifecycle, same-loop guard, PostgreSQL/Ollama probes, embedding dimension check, degraded FastAPI startup, explicit retry and restart-required state after storage failure. Tokenizer resources are explicitly installed and verified before Core startup.
+- Verified: real local `ainsert -> aquery_data` with PostgreSQL 16.14, pgvector 0.8.1, qwen3:8b and qwen3-embedding:0.6b (1024 dimensions). Retrieval returned 10 entities, 6 relationships, 1 chunk and 1 reference; all 12 storages finalized and the PostgreSQL pool closed. Degraded startup and focused lifecycle reviews were also checked.
+- Remaining deployment checks: Compose uses PostgreSQL 18; Docker daemon/Compose were unavailable on this host, so that deployment has not run. CI includes Python/PostgreSQL and frontend build checks but has not run remotely.
+
+## M1 sources and indexing
+
+- Implemented: immutable Vault originals, MD/TXT/PDF/DOCX parsing with resource bounds, explicit application migrations, source revisions, PostgreSQL job leases, upload/revision/retry/status APIs, bounded pagination and in-process indexing. The macOS-style Web source page connects to these APIs and distinguishes latest upload from current indexed revision.
+- Verified: the latest 54-test run passed (45 unit + 9 real PostgreSQL integration tests), including new binding/integrity regressions. Migration `0002_m1_vault_binding` applied and `alembic check` found no new operations. `npm ci`, TypeScript checking and production build passed. Python, TypeScript and integration review findings were resolved.
+- Real browser acceptance: uploads while a model was unavailable persisted originals; API restart with real models resumed queued jobs. New revision retained the old original; top-level import created an independent source; repeated content reused its existing record. Final state: 2 sources, 3 revisions, 3 succeeded jobs, all original SHA-256 values matched, and both latest revisions were current. Desktop (1280x800) and mobile (390x844) layouts were checked.
+- Vault selection: Web can preview/create/select a child folder of server-side `VAULT_PARENT_DIR`; the application database persists the binding. Populated roots cannot switch. Restart ignores changed initial `VAULT_ROOT`, validates registered original hashes and restores the selected root. Damaged originals disable uploads/indexing until repaired. Actual browser selection, file preservation, new-root import/index, locked state, keyboard close, preview invalidation, mobile overflow and process restart were verified; see [Vault verification](verification/m1-vault-setup-2026-09-30.md).
+- Revision polling follow-up (2026-10-01): fixed list-refresh cancellation of inspector requests. A second real revision indexed through local LightRAG; without manual refresh, list, latest/current cards and completed job converged. TypeScript/build passed for that fix; root inspected it, but two additional review-agent attempts failed due to account usage limits.
+- Detailed evidence: [local verification](verification/m0-m1-local-2026-09-30.md). These results accept the import/index slice, not all M0–M6 product requirements.
+
+## M2 Wiki file layer
+
+- Implemented: authoritative Markdown with bounded frontmatter/wikilinks, stable IDs, readonly diagnostics, SHA-256 saves and recovery snapshots; rebuildable PostgreSQL page/link projections, migrations `0003_m2_wiki` and `0004_m2_link_identity`; existing Wiki identities/files lock Vault selection. Single-loop Core ownership and original-source behavior remain integrated.
+- Verified: 96-test integration run passed, including actual PostgreSQL and 5,500-page projection coverage; migration head `0004` and `alembic check` passed. Real UI found a datetime serialization failure in 409 errors; the corrected regression uses actual timezone-aware datetime, and all 8 focused service/API tests passed after that fix. Final TypeScript/build and 5 frontend contract checks passed; Python, database, general and TypeScript finite re-reviews approved.
+- Real Web acceptance: two manual pages created in the isolated Vault, editor saved actual bytes/hash, wikilink/anchor opened the target, backlinks exposed source line/anchor. External file edit/move retained ID and unsaved browser text; stale save returned 409/current/diff without overwriting the file. Explicit reload and API restart recovered the current page/binding/backlinks. 1280×800, 760×664 and 390×844 workflows checked; narrow/mobile edit/save passed without horizontal overflow.
+- Independent file listener: after exiting Wiki browser polling, a synthetic file change reached PostgreSQL in about 0.31 seconds with no Wiki GET. Obsidian desktop itself was not operated; external changes were simulated through ordinary file operations. The portable external-editor race and remaining deployment limits are documented in [M2 verification](verification/m2-wiki-2026-10-01.md).
+- Build advisory: Wiki lazy chunk 683.49 kB / 228.95 kB gzip remains over Vite's suggested threshold; main JS is 259.03 kB. This is not a failed build, and performance baseline remains M6 work.
+
+## M3 generation and review — in progress
+
+- Implemented backend: shared revision/evidence identities; exact current/latest/active/ready eligibility; original and parsed hashes, exact quotations and available positions; strict structured draft validation and escaped Markdown/evidence rendering; durable generation jobs, immutable retained results, exclusive publication and current-evidence inspection APIs. Generation joins the existing same-loop Core lifecycle. This is a backend subset, not M3 acceptance.
+- Migrations: additive `0005_m3_generation` and `0006_m3_lookup_indexes` applied to disposable PostgreSQL `knowgrain_test` on port 55432. Runtime requires `0006`. `alembic check` found no new upgrade operations. No acceptance database/Vault was migrated or changed by these checks.
+- Verified 2026-10-01: 140 tests passed with the explicitly selected real PostgreSQL database, including six generation repository tests, two provenance predicate tests, same-parse reindex regression, six real-file generation pipeline checks, and append/replacement races. Actual pinned LightRAG role/Ollama callback binding and queue shutdown were tested with mocked provider transport; this does not prove real model output. See [M3 backend verification](verification/m3-backend-2026-10-01.md).
+- Review findings fixed: configured model callback/cache binding; reject original mutation during reads; unchanged parsed content preserves evidence snapshot time; database-clock lease checks after lock waits and before final updates; indexed exact provenance/target lookups; cancel/drain Core model queues before storage finalization. Finite general/Python/database re-reviews approved the relevant changes.
+- Pending M3: real Core/model generation acceptance, Web generation/claims/evidence inspection, explicit draft-to-reviewed file transition, proposal comparison/application, and interruption/restart acceptance for the integrated service. Repository review recording alone is not a working review user flow.
+
+## Remaining scope
+
+- Next: complete and accept M3 generation/review/proposals above, using the accepted M2 file/identity/conflict contract. Full dependency/model installation wizard remains M6 work.
+- M4: current-revision filtered questions, evidence navigation and graph bindings. Resolve evidence through stable document/revision mappings; upstream display filenames are not sufficient provenance.
+- M5: updates/deletion, reconciliation, crash recovery and backup/restore.
+- M6: complete Web UI, evaluation corpus, performance measurements and installation/release packaging.
+- Separate third-party LLM/embedding adapters remain planned; current execution uses Ollama.
