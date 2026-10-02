@@ -68,7 +68,7 @@ Compose 使用 PostgreSQL 18，数据卷挂载到 `/var/lib/postgresql`，遵循
 
 ## 导入资料与查看任务
 
-先执行 `make migrate`（当前迁移为 `0006_m3_lookup_indexes`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
+先执行 `make migrate`（当前迁移为 `0007_m3_review`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
 
 Web 顶部的 **Vault 设置** 可以预览和选择 `VAULT_PARENT_DIR` 下的一个文件夹（默认父目录 `./data/vaults`）。只输入文件夹名称，先查看哪些目录已存在、哪些将创建，再点击“使用此 Vault”。预览不写入文件；选择结果保存到应用数据库，重启时使用该绑定，后续改 `VAULT_ROOT` 不会覆盖选择。已有资料或 Wiki 后位置锁定，不能通过设置移动资料；后续迁移/恢复需专门流程。
 
@@ -109,7 +109,7 @@ curl -X POST http://127.0.0.1:8787/api/v1/sources/SOURCE_ID/reindex
 
 浏览器定期检查文件更新。编辑器有未保存内容时保留本地草稿；陈旧保存返回 HTTP 409，显示服务器内容和差异，可显式载入服务器版本。正常保存保留被替换版本到 `.knowgrain/wiki-recovery/{kg_id}/`。无法与不遵守应用锁的外部编辑器实现操作系统级原子版本比较：最后核验与替换之间仍有极小竞争窗口，详见 [M2 文件契约](docs/m2-wiki-contract.md)。数据库仅保存页面与链接投影，Markdown 是正文权威。
 
-## 生成后端（M3 开发中）
+## Wiki 生成与审阅
 
 已接入主题生成任务、严格声明与引用校验、当前原件核验和新草稿发布。生成任务先保留结果，重试沿用同一页面身份；人工改过的草稿不会被自动替换。模型未就绪时可排队，执行器等待 Core 就绪。
 
@@ -120,7 +120,11 @@ curl http://127.0.0.1:8787/api/v1/wiki/generation-jobs
 
 任务返回 `output_page_id`；生成后可通过 `GET /api/v1/wiki/pages/PAGE_ID/generation` 查看声明、证据和当前有效性，通过 `GET /api/v1/evidence/EVIDENCE_ID` 查看摘录。证据失效仍可查看，但不会标记为当前依据。HTTP 409 表示状态/内容冲突，503 表示数据库或 Vault 尚未就绪；失败任务可使用 `POST /api/v1/wiki/generation-jobs/JOB_ID/retry` 重试。
 
-当前验证为真实文件/HTTP 测试、真实 PostgreSQL 事务及使用测试替身的生成流水线。真实模型生成、Web 生成操作、显式审阅转换与提案应用尚未验收；M3 未完成。生成正文的引用校验不等同于事实语义核实，后续审阅界面需将声明与原文并列展示。
+在 Wiki 页面输入主题，点击 **生成新草稿**；也可选中页面后点击 **针对当前页面生成提案**。任务完成后打开生成页，逐条核对声明与原始摘录。只有未修改的生成版本与当前有效证据才可审阅。点击 **明确标记为已审阅** 后，页面保存到 `Wiki/Pages/`；提案需核对目标差异并点击 **应用提案到目标页面**，原提案仍保留。人工未保存的编辑会阻止这些操作。
+
+审阅 API 为 `POST /api/v1/wiki/pages/PAGE_ID/review`，请求 `{expected_sha256}`；应用提案为 `POST /api/v1/wiki/pages/PROPOSAL_ID/apply`，请求 `{expected_proposal_sha256, expected_target_sha256}`。页面、来源或目标发生变化返回 409；写入或数据库暂时故障返回 503。界面在网络/503 失败后保留原请求，提供 **继续上次操作**。若已重载浏览器，恢复时需复用原请求哈希：审阅使用清单中的 `generated_sha256`，提案使用其生成哈希和 `proposal_target_sha256`。服务端通过 `.knowgrain/review-operations/` 中的不可变日志恢复，只接受该操作的准确旧/新内容；不自动覆盖外部编辑。完整故障恢复界面仍属 M5 工作。
+
+本地 `qwen3.6:35b` 已通过真实 Core 检索与 Wiki 草稿生成验证，见 [模型切换验证](docs/verification/qwen36-local-2026-10-01.md)。M3 的 Web 审阅、提案应用、冲突保护、同请求重试和审阅状态重启恢复已本地验收，详见 [审阅验收记录](docs/verification/m3-review-2026-10-02.md)。生成正文的引用校验不等同于事实语义核实，审阅需要将声明与原文并列核对；M4–M6 与第三方模型适配仍在路线图中。
 
 ## 开发验证
 

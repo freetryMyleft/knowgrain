@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from knowgrain.models import GenerationJob, SourceDocument, SourceRevision, VaultBinding, WikiPage
 
 
-EXPECTED_SCHEMA_REVISION = "0006_m3_lookup_indexes"
+EXPECTED_SCHEMA_REVISION = "0007_m3_review"
 _VAULT_BINDING_LOCK_KEYS = (1263420247, 1196575049)
 
 

@@ -13,10 +13,12 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 
 from knowgrain.config import Settings
 from knowgrain.generation_api import install_generation_routes
@@ -30,7 +32,7 @@ from knowgrain.m3_types import (
 from knowgrain.parsers import parse_document
 from knowgrain.provenance import ProvenanceService
 from knowgrain.vault import VaultStore
-from knowgrain.wiki_files import WikiConflictError, parse_wiki
+from knowgrain.wiki_files import WikiConflictError, _frontmatter, parse_wiki
 from knowgrain.wiki_service import WikiService
 
 
@@ -65,8 +67,14 @@ class InMemoryWikiRepository:
 
     def __init__(self) -> None:
         self.pages = {}
+        self.fail_projection_after_successes = None
 
     async def replace_projection(self, pages) -> None:
+        if self.fail_projection_after_successes is not None:
+            if self.fail_projection_after_successes == 0:
+                self.fail_projection_after_successes = None
+                raise SQLAlchemyError("simulated projection interruption")
+            self.fail_projection_after_successes -= 1
         self.pages = {page.page_id: page for page in pages}
 
     async def list_pages(self, limit: int = 100, offset: int = 0):
@@ -121,14 +129,16 @@ class InMemoryGenerationRepository:
         self.stored_evidence: dict[UUID, Evidence] = {}
         self.completed = None
         self.store_result_calls = 0
+        self.target_page_id = None
+        self.expected_target_sha256 = None
 
     def job(self):
         return {
             "job_id": str(self.job_id),
             "output_page_id": str(self.output_page_id),
             "topic": "A source-backed topic",
-            "target_page_id": None,
-            "expected_target_sha256": None,
+            "target_page_id": str(self.target_page_id) if self.target_page_id else None,
+            "expected_target_sha256": self.expected_target_sha256,
             "result": self.result,
         }
 
@@ -161,12 +171,53 @@ class InMemoryGenerationRepository:
             "evidence": self.result["evidence"],
             "model": self.result["model"],
             "generated_sha256": self.completed["content_sha256"],
+            "proposal_target_page_id": str(self.target_page_id) if self.target_page_id else None,
+            "proposal_target_sha256": self.expected_target_sha256,
             "reviewed_sha256": None,
             "reviewed_at": None,
+            "created_at": "2026-10-01T00:00:00+00:00",
         }
 
     async def get_evidence(self, evidence_id):
         return self.stored_evidence.get(evidence_id)
+
+
+class InMemoryReviewRepository:
+    """Review ledger test double; file intents remain real and journaled."""
+
+    def __init__(self, wiki_repository: InMemoryWikiRepository) -> None:
+        self.wiki_repository = wiki_repository
+        self.operations = {}
+        self.bindings = {}
+        self.fail_complete_once = False
+
+    async def get_binding(self, page_id):
+        return self.bindings.get(page_id)
+
+    async def prepare(self, operation_id, **fields):
+        snapshot = {**fields, "state": "prepared"}
+        current = self.operations.get(operation_id)
+        if current and any(current.get(key) != value for key, value in fields.items()):
+            from knowgrain.generation_repository import GenerationConflictError
+
+            raise GenerationConflictError("operation mismatch")
+        if current is None:
+            self.operations[operation_id] = snapshot
+        return self.operations[operation_id]
+
+    async def complete(self, operation_id):
+        if self.fail_complete_once:
+            self.fail_complete_once = False
+            raise SQLAlchemyError("simulated database completion interruption")
+        operation = self.operations[operation_id]
+        operation["state"] = "completed"
+        self.bindings[operation["page_id"]] = {
+            "generation_page_id": str(operation["generation_page_id"]),
+            "reviewed_sha256": operation["reviewed_sha256"],
+            "reviewed_at": "2026-10-01T00:00:00+00:00",
+            "operation_id": str(operation_id),
+        }
+        return operation
 
 
 class DeterministicCore:
@@ -259,12 +310,14 @@ class GenerationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.wiki_repository = InMemoryWikiRepository()
         self.wiki = WikiService(self.vault, self.wiki_repository)
         self.generation_repository = InMemoryGenerationRepository(uuid4(), uuid4())
+        self.review_repository = InMemoryReviewRepository(self.wiki_repository)
         self.service = GenerationService(
             Settings(_env_file=None),
             self.generation_repository,
             self.provenance,
             self.core,
             self.wiki,
+            review_repository=self.review_repository,
         )
 
     async def test_result_is_retained_before_publication_and_retry_reuses_identity(self):
@@ -417,6 +470,235 @@ class GenerationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(related_pages), 0)
         self.assertIsNotNone(self.generation_repository.completed)
         self.assertEqual(self.core.generate_calls, 1)
+
+    async def test_explicit_review_moves_draft_and_retry_keeps_binding(self):
+        await self.service._process(self.generation_repository.job())
+        page_id = self.generation_repository.output_page_id
+        generated = await self.wiki.get_page(page_id)
+
+        reviewed = await self.service.review_page(page_id, generated["content_sha256"])
+        self.assertEqual(reviewed["status"], "reviewed")
+        self.assertEqual(reviewed["vault_path"], f"Wiki/Pages/{page_id}.md")
+        self.assertEqual(
+            self.vault.resolve(reviewed["vault_path"]).read_text(encoding="utf-8"),
+            reviewed["markdown"],
+        )
+        binding = await self.review_repository.get_binding(page_id)
+        self.assertEqual(binding["generation_page_id"], str(page_id))
+        self.assertEqual(binding["reviewed_sha256"], reviewed["content_sha256"])
+
+        retry = await self.service.review_page(page_id, generated["content_sha256"])
+        self.assertEqual(retry["content_sha256"], reviewed["content_sha256"])
+        self.assertEqual(len(self.review_repository.operations), 1)
+
+        detail = await self.service.generation_detail(page_id)
+        self.assertEqual(detail["page_id"], str(page_id))
+        self.assertEqual(detail["generation_page_id"], str(page_id))
+        self.assertIsNone(detail["proposal"])
+        self.assertFalse(detail["content_modified"])
+
+    async def test_review_retries_after_projection_failure_without_overwriting(self):
+        await self.service._process(self.generation_repository.job())
+        page_id = self.generation_repository.output_page_id
+        generated = await self.wiki.get_page(page_id)
+        # _review_scan_locked first projects the old state; fail the next
+        # replacement, which happens after the journaled file commit.
+        self.wiki_repository.fail_projection_after_successes = 1
+        with self.assertRaisesRegex(SQLAlchemyError, "simulated projection interruption"):
+            await self.service.review_page(page_id, generated["content_sha256"])
+        reviewed_path = self.vault.resolve(f"Wiki/Pages/{page_id}.md")
+        draft_path = self.vault.resolve(f"Wiki/Drafts/{page_id}.md")
+        self.assertTrue(reviewed_path.exists())
+        self.assertFalse(draft_path.exists())
+
+        retried = await self.service.review_page(page_id, generated["content_sha256"])
+        self.assertEqual(retried["status"], "reviewed")
+        self.assertEqual(len(self.review_repository.operations), 1)
+
+    async def test_review_api_returns_503_after_completion_failure_then_retry_succeeds(self):
+        await self.service._process(self.generation_repository.job())
+        page_id = self.generation_repository.output_page_id
+        generated = await self.wiki.get_page(page_id)
+        self.review_repository.fail_complete_once = True
+        app = self._generation_app()
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://knowgrain.test"
+        ) as client:
+            first = await client.post(
+                f"/api/v1/wiki/pages/{page_id}/review",
+                json={"expected_sha256": generated["content_sha256"]},
+            )
+            retry = await client.post(
+                f"/api/v1/wiki/pages/{page_id}/review",
+                json={"expected_sha256": generated["content_sha256"]},
+            )
+            stale = await client.post(
+                f"/api/v1/wiki/pages/{page_id}/review",
+                json={"expected_sha256": "0" * 64},
+            )
+
+        self.assertEqual(first.status_code, 503)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()["status"], "reviewed")
+        self.assertEqual(stale.status_code, 409)
+
+    async def test_review_api_recovers_partial_move_after_duplicate_scan_projection(self):
+        await self.service._process(self.generation_repository.job())
+        page_id = self.generation_repository.output_page_id
+        generated = await self.wiki.get_page(page_id)
+        app = self._generation_app()
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://knowgrain.test"
+        ) as client:
+            with patch.object(
+                self.service.review_files,
+                "_remove_old_after_move",
+                side_effect=OSError("simulated interruption after destination publication"),
+            ):
+                first = await client.post(
+                    f"/api/v1/wiki/pages/{page_id}/review",
+                    json={"expected_sha256": generated["content_sha256"]},
+                )
+            # Simulate the background watcher reconciling the duplicate-ID scan
+            # before the user's explicit same-request retry arrives.
+            await self.wiki._scan_locked()
+            retry = await client.post(
+                f"/api/v1/wiki/pages/{page_id}/review",
+                json={"expected_sha256": generated["content_sha256"]},
+            )
+
+        self.assertEqual(first.status_code, 503)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()["status"], "reviewed")
+        self.assertFalse(self.vault.resolve(f"Wiki/Drafts/{page_id}.md").exists())
+        self.assertTrue(self.vault.resolve(f"Wiki/Pages/{page_id}.md").is_file())
+
+    async def test_unjournaled_duplicate_does_not_repair_projection_or_prepare_review(self):
+        await self.service._process(self.generation_repository.job())
+        page_id = self.generation_repository.output_page_id
+        generated = await self.wiki.get_page(page_id)
+        metadata, body = _frontmatter(generated["markdown"])
+        duplicate_markdown = self.service._render_reviewed_markdown(
+            {**metadata, "kg_id": str(page_id), "kg_status": "reviewed"}, body
+        )
+        duplicate_path = f"Wiki/Pages/{page_id}.md"
+        self.wiki.files._ensure_parent(duplicate_path)
+        self.wiki.files._publish_exclusive(
+            self.vault.resolve(duplicate_path), duplicate_markdown.encode("utf-8")
+        )
+        # Reproduce a prior watcher pass: a duplicate scan makes the projected
+        # identity unavailable before the explicit review request arrives.
+        await self.wiki._scan_locked()
+        self.assertNotIn(page_id, self.wiki_repository.pages)
+
+        with self.assertRaises(WikiConflictError):
+            await self.service.review_page(page_id, generated["content_sha256"])
+
+        self.assertNotIn(page_id, self.wiki_repository.pages)
+        self.assertEqual(self.review_repository.operations, {})
+        self.assertTrue(self.vault.resolve(f"Wiki/Drafts/{page_id}.md").is_file())
+        self.assertTrue(self.vault.resolve(duplicate_path).is_file())
+
+    async def test_proposal_apply_preserves_target_metadata_and_manifest_binding(self):
+        target = await self.wiki.create("Human-owned title", "Human-owned notes.\n")
+        target_id = UUID(target["page_id"])
+        self.generation_repository.target_page_id = target_id
+        self.generation_repository.expected_target_sha256 = target["content_sha256"]
+        await self.service._process(self.generation_repository.job())
+        proposal_id = self.generation_repository.output_page_id
+        proposal = await self.wiki.get_page(proposal_id)
+
+        detail = await self.service.generation_detail(proposal_id)
+        self.assertEqual(detail["generation_page_id"], str(proposal_id))
+        self.assertIsInstance(detail["proposal"], dict)
+        proposal_diff = detail["proposal"]["diff"]
+        self.assertLessEqual(len(proposal_diff.encode("utf-8")), 64 * 1024)
+        self.assertIn("Human-owned notes.", proposal_diff)
+        self.assertIn("The source records a verified fact", proposal_diff)
+        self.assertNotIn("kg_id", proposal_diff)
+        self.assertNotIn("kg_status", proposal_diff)
+
+        applied = await self.service.apply_proposal(
+            proposal_id,
+            expected_proposal_sha256=proposal["content_sha256"],
+            expected_target_sha256=target["content_sha256"],
+        )
+        self.assertEqual(applied["page_id"], str(target_id))
+        self.assertEqual(applied["status"], "reviewed")
+        self.assertEqual(applied["title"], "Human-owned title")
+        self.assertIn("The source records a verified fact", applied["markdown"])
+        self.assertEqual(
+            applied["vault_path"], f"Wiki/Pages/{target_id}.md"
+        )
+        # Applying changes the current binding only; proposal and its manifest stay intact.
+        self.assertTrue(self.vault.resolve(f"Wiki/Drafts/{proposal_id}.md").exists())
+        self.assertEqual(
+            (await self.service.generation_detail(target_id))["generation_page_id"],
+            str(proposal_id),
+        )
+        proposal_detail = await self.service.generation_detail(proposal_id)
+        self.assertEqual(proposal_detail["generated_sha256"], proposal["content_sha256"])
+
+        retry = await self.service.apply_proposal(
+            proposal_id,
+            expected_proposal_sha256=proposal["content_sha256"],
+            expected_target_sha256=target["content_sha256"],
+        )
+        self.assertEqual(retry["content_sha256"], applied["content_sha256"])
+        self.assertEqual(len(self.review_repository.operations), 1)
+
+    async def test_proposal_target_or_evidence_drift_blocks_application(self):
+        target = await self.wiki.create("Target title", "Original target.\n")
+        target_id = UUID(target["page_id"])
+        self.generation_repository.target_page_id = target_id
+        self.generation_repository.expected_target_sha256 = target["content_sha256"]
+        await self.service._process(self.generation_repository.job())
+        proposal_id = self.generation_repository.output_page_id
+        proposal = await self.wiki.get_page(proposal_id)
+
+        edited_target = target["markdown"] + "External edit.\n"
+        self.vault.resolve(target["vault_path"]).write_text(edited_target, encoding="utf-8")
+        with self.assertRaises(WikiConflictError):
+            await self.service.apply_proposal(
+                proposal_id,
+                expected_proposal_sha256=proposal["content_sha256"],
+                expected_target_sha256=target["content_sha256"],
+            )
+        self.assertEqual(
+            self.vault.resolve(target["vault_path"]).read_text(encoding="utf-8"),
+            edited_target,
+        )
+
+        # Restore the exact target snapshot, then make the evidence source stale.
+        self.vault.resolve(target["vault_path"]).write_text(target["markdown"], encoding="utf-8")
+        self.source_path.write_bytes(b"Source changed before explicit application.")
+        with self.assertRaises(EvidenceUnavailableError):
+            await self.service.apply_proposal(
+                proposal_id,
+                expected_proposal_sha256=proposal["content_sha256"],
+                expected_target_sha256=target["content_sha256"],
+            )
+        self.assertEqual(
+            self.vault.resolve(target["vault_path"]).read_text(encoding="utf-8"),
+            target["markdown"],
+        )
+
+    def _generation_app(self):
+        app = FastAPI()
+        install_generation_routes(app)
+        app.state.runtime = type(
+            "Runtime",
+            (),
+            {
+                "_runtime_lock": asyncio.Lock(),
+                "database": type("Database", (), {"is_ready": True})(),
+                "vault_ready": True,
+                "generation": self.service,
+            },
+        )()
+        return app
 
 
 if __name__ == "__main__":

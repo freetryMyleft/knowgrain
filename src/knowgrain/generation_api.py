@@ -20,6 +20,17 @@ class WikiDraftRequest(BaseModel):
     expected_target_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class WikiReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WikiApplyProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_proposal_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_target_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def public_job(job: dict) -> dict:
     # Lists/progress never include the retained potentially large source corpus.
     return {key: value for key, value in job.items() if key != "result"}
@@ -33,13 +44,35 @@ def install_generation_routes(app: FastAPI) -> None:
                 raise HTTPException(503, "应用数据库或 Vault 未就绪")
             try:
                 return await action(runtime.generation)
-            except (GenerationConflictError, WikiConflictError):
-                raise HTTPException(409, {"code": "generation_conflict", "message": "生成状态或目标版本已变化，请刷新"}) from None
+            except WikiConflictError as exc:
+                if exc.code in {
+                    "review_write_failed", "write_failed", "scan_incomplete",
+                    "scan_limit", "scan_error",
+                }:
+                    raise HTTPException(503, "Wiki 文件暂时无法写入，请使用相同版本重试") from None
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "generation_conflict",
+                        "message": "生成状态或目标版本已变化，请刷新",
+                    },
+                ) from None
+            except GenerationConflictError:
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "generation_conflict",
+                        "message": "生成状态或目标版本已变化，请刷新",
+                    },
+                ) from None
             except WikiNotFoundError:
                 raise HTTPException(404, "Wiki 页面不存在") from None
             except (WikiValidationError, ValueError) as exc:
                 if isinstance(exc, EvidenceUnavailableError):
-                    raise HTTPException(409, {"code": "stale_evidence", "message": "证据已失效，请核对当前来源"}) from None
+                    raise HTTPException(
+                        409,
+                        {"code": "stale_evidence", "message": "证据已失效，请核对当前来源"},
+                    ) from None
                 raise HTTPException(422, "生成请求不符合主题、页面或证据规则") from None
             except (WikiScanUnavailableError, SQLAlchemyError, OSError):
                 raise HTTPException(503, "生成服务暂不可用，请检查数据库与 Vault") from None
@@ -73,6 +106,26 @@ def install_generation_routes(app: FastAPI) -> None:
     @app.get("/api/v1/wiki/pages/{page_id}/generation", tags=["generation"])
     async def generation_detail(request: Request, page_id: UUID):
         return await operation(request, lambda service: service.generation_detail(page_id))
+
+    @app.post("/api/v1/wiki/pages/{page_id}/review", tags=["generation"])
+    async def review_page(request: Request, page_id: UUID, payload: WikiReviewRequest):
+        return await operation(
+            request,
+            lambda service: service.review_page(page_id, payload.expected_sha256),
+        )
+
+    @app.post("/api/v1/wiki/pages/{proposal_id}/apply", tags=["generation"])
+    async def apply_proposal(
+        request: Request, proposal_id: UUID, payload: WikiApplyProposalRequest
+    ):
+        return await operation(
+            request,
+            lambda service: service.apply_proposal(
+                proposal_id,
+                expected_proposal_sha256=payload.expected_proposal_sha256,
+                expected_target_sha256=payload.expected_target_sha256,
+            ),
+        )
 
     @app.get("/api/v1/evidence/{evidence_id}", tags=["generation"])
     async def evidence_detail(request: Request, evidence_id: UUID):

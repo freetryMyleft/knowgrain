@@ -17,6 +17,7 @@ import {
   WikiReadLifecycle,
 } from './wiki-contract'
 import type { Backlink, BacklinkResponse, ConflictDetail, PageDetail, PageListResponse, PageSummary, WikiIssue, WikiLink } from './wiki-contract'
+import WikiGenerationPanel from './WikiGenerationPanel'
 import './wiki.css'
 
 const API_ROOT = '/api/v1'
@@ -529,6 +530,11 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
 
   const current = observedDetail ?? baseDetail
   const externalChanged = Boolean(baseDetail && observedDetail && observedDetail.content_sha256 !== baseHashAtObservedRef.current)
+  const refreshGenerationContext = useCallback(() => {
+    void loadList(pageIndex * PAGE_SIZE, undefined, true)
+    const id = selectedIdRef.current
+    if (id) void refreshSelected(id, undefined, true)
+  }, [loadList, pageIndex, refreshSelected])
 
   return <main className="desktop-shell wiki-shell">
     <div className="app-window wiki-window">
@@ -575,7 +581,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
         </section>
 
         <section className="wiki-detail" aria-label="Wiki 页面详情" aria-busy={detailLoading}>
-          {!selectedId ? <div className="wiki-detail-empty"><div className="wiki-empty-icon">W</div><strong>选择一篇 Wiki 页面</strong><p>查看 Markdown、编辑正文并浏览反向链接。</p></div> : detailLoading && !baseDetail ? <div className="inspector-loading"><span className="spinner" />正在读取页面…</div> : detailError && !baseDetail ? <div className="wiki-detail-empty error-state"><div className="state-icon">!</div><strong>页面暂时无法载入</strong><p>{detailError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入列表</button></div> : current ? <>
+          {!selectedId ? <><div className="wiki-detail-empty"><div className="wiki-empty-icon">W</div><strong>选择一篇 Wiki 页面</strong><p>查看 Markdown、编辑正文并浏览反向链接。</p></div><WikiGenerationPanel page={null} dirty={dirty || saving || Boolean(conflict)} onOpenPage={(id) => { navigateToPage(id) }} onChanged={refreshGenerationContext} /></> : detailLoading && !baseDetail ? <div className="inspector-loading"><span className="spinner" />正在读取页面…</div> : detailError && !baseDetail ? <div className="wiki-detail-empty error-state"><div className="state-icon">!</div><strong>页面暂时无法载入</strong><p>{detailError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入列表</button></div> : current ? <>
         <div className="wiki-detail-head">
               <div className="wiki-page-heading"><div className="column-kicker">{current.status === 'reviewed' ? '已审阅页面' : '草稿页面'}</div><h2 title={current.title}>{current.title}</h2><div className="wiki-page-path mono">{current.vault_path}</div></div>
               <div className="wiki-detail-actions"><button type="button" className="secondary-button" onClick={() => void refreshSelected(current.page_id, undefined, true)}>刷新</button><button type="button" className="primary-button" onClick={() => void save()} disabled={!dirty || saving || Boolean(conflict)}>{saving ? '正在保存…' : '保存'}</button></div>
@@ -591,6 +597,13 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
               <div className="wiki-conflict-actions"><span>保存冲突不会覆盖 Vault 文件。</span><button type="button" className="secondary-button" onClick={reloadConflictVersion} disabled={!conflict.current}>载入服务器当前版本</button></div>
             </section>}
             {notice && <div className="wiki-callout notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice(null)}>×</button></div>}
+
+            <WikiGenerationPanel
+              page={current}
+              dirty={dirty || saving || Boolean(conflict)}
+              onOpenPage={(id) => { navigateToPage(id) }}
+              onChanged={refreshGenerationContext}
+            />
 
             <div className="wiki-editor-preview-labels"><span>Markdown 编辑器</span><span>预览</span></div>
             <div className="wiki-editor-preview">

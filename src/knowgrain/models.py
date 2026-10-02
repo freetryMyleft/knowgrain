@@ -360,3 +360,103 @@ class PageEvidence(Base):
         primary_key=True,
     )
     claim_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class ReviewOperation(Base):
+    """Immutable intent and completion state for one explicit review action."""
+
+    __tablename__ = "review_operation"
+    __table_args__ = (
+        CheckConstraint(
+            "length(expected_page_sha256) = 64 AND expected_page_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_review_operation_expected_page_sha256",
+        ),
+        CheckConstraint(
+            "length(expected_generation_sha256) = 64 AND expected_generation_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_review_operation_expected_generation_sha256",
+        ),
+        CheckConstraint(
+            "length(reviewed_sha256) = 64 AND reviewed_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_review_operation_reviewed_sha256",
+        ),
+        CheckConstraint(
+            "state IN ('prepared', 'completed')", name="ck_review_operation_state"
+        ),
+        CheckConstraint(
+            "(state = 'completed') = (completed_at IS NOT NULL)",
+            name="ck_review_operation_completed_pair",
+        ),
+        Index("ix_review_operation_page", "page_id"),
+        Index("ix_review_operation_generation", "generation_page_id"),
+    )
+
+    operation_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    page_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "wiki_page.id", name="fk_review_operation_page_id_wiki_page", ondelete="RESTRICT"
+        ),
+        nullable=False,
+    )
+    generation_page_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "generated_page.page_id",
+            name="fk_review_operation_generation_page_id_generated_page",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    expected_page_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_generation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewed_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="prepared", server_default="prepared"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PageGenerationBinding(Base):
+    """Current reviewed Wiki identity mapped to its immutable generation manifest."""
+
+    __tablename__ = "page_generation_binding"
+    __table_args__ = (
+        CheckConstraint(
+            "length(reviewed_sha256) = 64 AND reviewed_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_page_generation_binding_reviewed_sha256",
+        ),
+        Index("ix_page_generation_binding_generation", "generation_page_id"),
+    )
+
+    page_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "wiki_page.id",
+            name="fk_page_generation_binding_page_id_wiki_page",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    generation_page_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "generated_page.page_id",
+            name="fk_page_generation_binding_generation_page_id_generated_page",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    reviewed_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    operation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "review_operation.operation_id",
+            name="fk_page_generation_binding_operation_id_review_operation",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
