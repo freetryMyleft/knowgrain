@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -8,7 +9,8 @@ import unittest
 from uuid import UUID, uuid4
 
 from knowgrain.config import Settings
-from knowgrain.evidence_access import EvidenceFileError
+from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
+from knowgrain.source_archive_files import ArchiveEntry, SourceArchiveFiles
 from knowgrain.source_repository import SourceConflictError, SourceNotFoundError
 from knowgrain.source_service import SourceLifecycleUnavailableError, SourceService
 from knowgrain.vault import VaultStore
@@ -63,7 +65,7 @@ class FakeEvidenceAccess:
         self.reads = []
         self.error: EvidenceFileError | None = None
 
-    def original_revision(self, relative, expected_sha256):
+    def original_revision(self, relative, expected_sha256, *, allow_archived=True):
         self.reads.append((relative, expected_sha256))
         if self.error:
             raise self.error
@@ -128,6 +130,26 @@ class SourceLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.evidence.reads), 1)
 
+    async def test_legacy_service_cannot_activate_originals_still_in_trash(self):
+        self.vault.initialize()
+        content = b"retained original"
+        path = self.vault.write_source(SOURCE_ID, LATEST_ID, "original.txt", content)
+        digest = hashlib.sha256(content).hexdigest()
+        SourceArchiveFiles(self.vault).archive(SOURCE_ID, (
+            ArchiveEntry(LATEST_ID, path, digest),
+        ))
+        self.repository.snapshot = source_snapshot(current_id=LATEST_ID)
+        for field in ("latest_revision", "current_revision"):
+            self.repository.snapshot[field].update(vault_path=path, sha256=digest)
+        service = SourceService(Settings(_env_file=None), self.repository, self.vault)
+        self.assertEqual(EvidenceAccess(self.vault).original_revision(path, digest), content)
+        with self.assertRaises(SourceConflictError):
+            await service.restore_source(
+                SOURCE_ID, expected_lifecycle_version=1,
+                expected_latest_revision_id=LATEST_ID,
+            )
+        self.assertEqual(self.repository.calls, [])
+
     async def test_restore_maps_missing_or_changed_files_to_safe_conflict(self):
         for code in ("missing", "conflict"):
             with self.subTest(code=code):
@@ -166,7 +188,7 @@ class SourceLifecycleServiceTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
 
         class BlockingReader:
-            def original_revision(self, relative, expected_sha256):
+            def original_revision(self, relative, expected_sha256, *, allow_archived=True):
                 started.set()
                 release.wait()
                 return b"verified"

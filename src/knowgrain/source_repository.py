@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from knowgrain.database import ApplicationDatabase
-from knowgrain.models import CoreMaintenanceJob, Job, SourceDocument, SourceRevision
+from knowgrain.models import (
+    CoreMaintenanceJob,
+    Job,
+    SourceDocument,
+    SourceFileOperation,
+    SourceRevision,
+)
 
 
 PersistSource = Callable[[uuid.UUID, uuid.UUID], Awaitable[str]]
@@ -209,6 +215,12 @@ class SourceRepository:
                 ).all()
             )
             maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            file_operations = await self._lock_source_file_operations(session, source.id)
+            if any(
+                operation.kind == "restore" and operation.state in {"queued", "running"}
+                for operation in file_operations
+            ):
+                raise SourceConflictError("A restore operation is already pending")
             revisions = list(
                 (
                     await session.scalars(
@@ -276,6 +288,11 @@ class SourceRepository:
             if source is None:
                 raise SourceNotFoundError(f"Source {source_id} does not exist")
 
+            index_jobs = await self._lock_source_index_jobs(session, source.id)
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            file_operations = await self._lock_source_file_operations(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+
             if (
                 source.state == "active"
                 and source.lifecycle_version == expected_lifecycle_version + 1
@@ -286,6 +303,12 @@ class SourceRepository:
                 )
             ):
                 return await self._source_snapshot(session, source)
+            if any(
+                operation.lifecycle_version == expected_lifecycle_version
+                and operation.state != "cancelled"
+                for operation in file_operations
+            ):
+                raise SourceConflictError("Source file operations must use the file journal")
             if (
                 source.state != "deleted"
                 or source.lifecycle_version != expected_lifecycle_version
@@ -294,65 +317,120 @@ class SourceRepository:
             ):
                 raise SourceConflictError("Source changed; refresh before restoring")
 
-            index_jobs = await self._lock_source_index_jobs(session, source.id)
-            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
-            revisions = await self._lock_source_revisions(session, source.id)
             if any(job.state == "running" for job in maintenance_jobs):
                 raise SourceConflictError("Core cleanup is still running; retry restore later")
 
             now = await self._database_now(session)
-            attempted_cleanup = any(
-                job.lifecycle_version == source.lifecycle_version and job.attempts > 0
-                for job in maintenance_jobs
+            return await self._activate_restored_source(
+                session,
+                source,
+                index_jobs=index_jobs,
+                maintenance_jobs=maintenance_jobs,
+                file_operations=file_operations,
+                revisions=revisions,
+                expected_latest_revision_id=expected_latest_revision_id,
+                verified_current_revision_id=verified_current_revision_id,
+                now=now,
+                restore_operation=None,
             )
-            for maintenance in maintenance_jobs:
-                if maintenance.lifecycle_version != source.lifecycle_version:
-                    continue
-                if maintenance.state == "queued" or (
-                    maintenance.state == "failed" and maintenance.attempts == 0
-                ):
-                    maintenance.state = "cancelled"
-                    maintenance.lease_owner = None
-                    maintenance.lease_until = None
-                    maintenance.error = None
-                    maintenance.updated_at = now
 
-            if attempted_cleanup and source.latest_revision_id is not None:
-                latest_job = next(
-                    (
-                        job
-                        for job in index_jobs
-                        if job.revision_id == source.latest_revision_id
-                    ),
-                    None,
-                )
-                latest_revision = next(
-                    (
-                        revision
-                        for revision in revisions
-                        if revision.id == source.latest_revision_id
-                    ),
-                    None,
-                )
-                if latest_job is None or latest_revision is None:
-                    raise SourceConflictError("Latest revision indexing record is missing")
-                latest_job.state = "queued"
-                latest_job.force_rebuild = True
-                latest_job.cleanup_chunk_ids = self._merge_cleanup_manifests(
-                    latest_revision.id, index_jobs, maintenance_jobs
-                )
-                latest_job.lease_owner = None
-                latest_job.lease_until = None
-                latest_job.error = None
-                latest_job.updated_at = now
-                latest_revision.index_state = "queued"
-                latest_revision.error = None
-                source.current_revision_id = None
+    async def _activate_restored_source(
+        self,
+        session: AsyncSession,
+        source: SourceDocument,
+        *,
+        index_jobs: Sequence[Job],
+        maintenance_jobs: Sequence[CoreMaintenanceJob],
+        file_operations: Sequence[SourceFileOperation],
+        revisions: Sequence[SourceRevision],
+        expected_latest_revision_id: uuid.UUID | None,
+        verified_current_revision_id: uuid.UUID | None,
+        now: datetime,
+        restore_operation: SourceFileOperation | None,
+    ) -> dict:
+        """Activate a deleted source after its exact archive restore has completed.
 
-            source.state = "active"
-            source.lifecycle_version += 1
-            await session.flush()
-            return await self._source_snapshot(session, source)
+        The file-journal path passes the succeeded current-cycle restore row. The
+        legacy repository path is retained only for sources with no live file
+        journal, which keeps pre-M5 repository-only tests and installations
+        without archived source files compatible.
+        """
+        if restore_operation is None:
+            if any(
+                operation.lifecycle_version == source.lifecycle_version
+                and operation.state != "cancelled"
+                for operation in file_operations
+            ):
+                raise SourceConflictError("Source file operations must use the file journal")
+        elif (
+            restore_operation not in file_operations
+            or restore_operation.kind != "restore"
+            or restore_operation.state != "succeeded"
+            or restore_operation.lifecycle_version != source.lifecycle_version
+            or restore_operation.expected_latest_revision_id != expected_latest_revision_id
+            or restore_operation.verified_current_revision_id != verified_current_revision_id
+        ):
+            raise SourceConflictError("Restore operation does not match this source lifecycle")
+
+        if (
+            source.state != "deleted"
+            or source.latest_revision_id != expected_latest_revision_id
+            or source.current_revision_id != verified_current_revision_id
+        ):
+            raise SourceConflictError("Source changed; refresh before restoring")
+
+        attempted_cleanup = any(
+            job.lifecycle_version == source.lifecycle_version and job.attempts > 0
+            for job in maintenance_jobs
+        )
+        for maintenance in maintenance_jobs:
+            if maintenance.lifecycle_version != source.lifecycle_version:
+                continue
+            if maintenance.state == "queued" or (
+                maintenance.state == "failed" and maintenance.attempts == 0
+            ):
+                maintenance.state = "cancelled"
+                maintenance.lease_owner = None
+                maintenance.lease_until = None
+                maintenance.error = None
+                maintenance.updated_at = now
+
+        if attempted_cleanup and source.latest_revision_id is not None:
+            latest_job = next(
+                (
+                    job
+                    for job in index_jobs
+                    if job.revision_id == source.latest_revision_id
+                ),
+                None,
+            )
+            latest_revision = next(
+                (
+                    revision
+                    for revision in revisions
+                    if revision.id == source.latest_revision_id
+                ),
+                None,
+            )
+            if latest_job is None or latest_revision is None:
+                raise SourceConflictError("Latest revision indexing record is missing")
+            latest_job.state = "queued"
+            latest_job.force_rebuild = True
+            latest_job.cleanup_chunk_ids = self._merge_cleanup_manifests(
+                latest_revision.id, index_jobs, maintenance_jobs
+            )
+            latest_job.lease_owner = None
+            latest_job.lease_until = None
+            latest_job.error = None
+            latest_job.updated_at = now
+            latest_revision.index_state = "queued"
+            latest_revision.error = None
+            source.current_revision_id = None
+
+        source.state = "active"
+        source.lifecycle_version += 1
+        await session.flush()
+        return await self._source_snapshot(session, source)
 
     async def get_revision(self, revision_id: uuid.UUID) -> dict | None:
         async with self.database.session_factory() as session:
@@ -391,16 +469,21 @@ class SourceRepository:
                 raise SourceConflictError("A deleted source cannot be reindexed")
             if source.latest_revision_id is None:
                 raise SourceConflictError("Source has no revision to reindex")
-            job = await self._job_for_revision(session, source.latest_revision_id, lock=True)
+            jobs = await self._lock_source_index_jobs(session, source.id)
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            await self._lock_source_file_operations(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+            job = next(
+                (candidate for candidate in jobs if candidate.revision_id == source.latest_revision_id),
+                None,
+            )
+            if job is None:
+                raise SourceConflictError("Index job record is missing for this revision")
             if job.state in {"queued", "running"}:
                 raise SourceConflictError("The latest revision is already queued or indexing")
-            maintenance_jobs = await self._lock_revision_maintenance_jobs(
-                session, source.latest_revision_id
-            )
-            revision = await session.scalar(
-                select(SourceRevision)
-                .where(SourceRevision.id == source.latest_revision_id)
-                .with_for_update()
+            revision = next(
+                (candidate for candidate in revisions if candidate.id == source.latest_revision_id),
+                None,
             )
             if revision is None:
                 raise SourceConflictError("Latest revision record is missing")
@@ -442,16 +525,15 @@ class SourceRepository:
             if candidate is None:
                 return None
             source, job_id = candidate
-            job = await session.scalar(
-                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
-            )
+            jobs = await self._lock_source_index_jobs(session, source.id)
+            _maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            _file_operations = await self._lock_source_file_operations(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+            job = next((candidate for candidate in jobs if candidate.id == job_id), None)
             if job is None:
                 return None
-            await self._lock_revision_maintenance_jobs(session, job.revision_id)
-            revision = await session.scalar(
-                select(SourceRevision)
-                .where(SourceRevision.id == job.revision_id)
-                .with_for_update()
+            revision = next(
+                (candidate for candidate in revisions if candidate.id == job.revision_id), None
             )
             if revision is None:
                 raise SourceConflictError("Index job references a missing revision")
@@ -534,25 +616,17 @@ class SourceRepository:
             if candidate is None:
                 return None
             source, revision_id, maintenance_id, index_job_id = candidate
-            index_job = await session.scalar(
-                select(Job)
-                .where(Job.id == index_job_id)
-                .with_for_update(skip_locked=True)
-            )
-            if index_job is None:
-                return None
-            maintenance = await session.scalar(
-                select(CoreMaintenanceJob)
-                .where(CoreMaintenanceJob.id == maintenance_id)
-                .with_for_update(skip_locked=True)
+            index_jobs = await self._lock_source_index_jobs(session, source.id)
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            file_operations = await self._lock_source_file_operations(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+            index_job = next((job for job in index_jobs if job.id == index_job_id), None)
+            maintenance = next(
+                (job for job in maintenance_jobs if job.id == maintenance_id), None
             )
             if maintenance is None:
                 return None
-            revision = await session.scalar(
-                select(SourceRevision)
-                .where(SourceRevision.id == revision_id)
-                .with_for_update()
-            )
+            revision = next((item for item in revisions if item.id == revision_id), None)
             if revision is None:
                 raise SourceConflictError("Maintenance job references a missing revision")
             now = await self._database_now(session)
@@ -560,6 +634,15 @@ class SourceRepository:
                 source.state != "deleted"
                 or maintenance.lifecycle_version != source.lifecycle_version
                 or not self._is_claimable(maintenance, now)
+            ):
+                return None
+            if index_job is None:
+                return None
+            if any(
+                operation.kind == "restore"
+                and operation.lifecycle_version == source.lifecycle_version
+                and operation.state != "cancelled"
+                for operation in file_operations
             ):
                 return None
             if revision.source_id != source.id or index_job.revision_id != revision.id:
@@ -586,7 +669,7 @@ class SourceRepository:
             context = await self._lock_maintenance_context(session, job_id)
             if context is None:
                 return False
-            source, maintenance, _revision = context
+            source, maintenance, _revision, _file_operations = context
             now = await self._database_now(session)
             if not self._has_live_maintenance_lease(source, maintenance, owner, now):
                 return False
@@ -605,7 +688,7 @@ class SourceRepository:
             context = await self._lock_maintenance_context(session, job_id)
             if context is None:
                 return False
-            source, maintenance, _revision = context
+            source, maintenance, _revision, _file_operations = context
             now = await self._database_now(session)
             if not self._has_live_maintenance_lease(source, maintenance, owner, now):
                 return False
@@ -618,7 +701,7 @@ class SourceRepository:
             context = await self._lock_maintenance_context(session, job_id)
             if context is None:
                 return False
-            source, maintenance, revision = context
+            source, maintenance, revision, _file_operations = context
             now = await self._database_now(session)
             if not self._has_live_maintenance_lease(source, maintenance, owner, now):
                 return False
@@ -629,6 +712,9 @@ class SourceRepository:
             maintenance.updated_at = now
             revision.index_state = "failed"
             revision.error = _MAINTENANCE_CLEANED_ERROR
+            from knowgrain.source_file_repository import enqueue_archive_for_source
+
+            await enqueue_archive_for_source(session, source)
             return True
 
     async def fail_maintenance(
@@ -639,7 +725,7 @@ class SourceRepository:
             context = await self._lock_maintenance_context(session, job_id)
             if context is None:
                 return False
-            source, maintenance, _revision = context
+            source, maintenance, _revision, _file_operations = context
             now = await self._database_now(session)
             if not self._has_live_maintenance_lease(source, maintenance, owner, now):
                 return False
@@ -679,6 +765,7 @@ class SourceRepository:
                     continue
                 await self._lock_source_index_jobs(session, source.id)
                 maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+                await self._lock_source_file_operations(session, source.id)
                 await self._lock_source_revisions(session, source.id)
                 now = await self._database_now(session)
                 for maintenance in maintenance_jobs:
@@ -701,12 +788,19 @@ class SourceRepository:
             context = await self._lock_maintenance_context(session, job_id)
             if context is None:
                 raise SourceNotFoundError(f"Maintenance job {job_id} does not exist")
-            source, maintenance, _revision = context
+            source, maintenance, _revision, file_operations = context
             if (
                 source.state != "deleted"
                 or source.lifecycle_version != maintenance.lifecycle_version
             ):
                 raise SourceConflictError("Maintenance job is not for the current deleted cycle")
+            if any(
+                operation.kind == "restore"
+                and operation.lifecycle_version == source.lifecycle_version
+                and operation.state != "cancelled"
+                for operation in file_operations
+            ):
+                raise SourceConflictError("A restore operation blocks Core cleanup")
             if maintenance.state in {"running", "succeeded", "cancelled"}:
                 raise SourceConflictError("Maintenance job cannot be retried in its current state")
             now = await self._database_now(session)
@@ -825,32 +919,15 @@ class SourceRepository:
                 )
                 if source is None:
                     continue
-                jobs = list(
-                    (
-                        await session.scalars(
-                            select(Job)
-                            .join(SourceRevision, SourceRevision.id == Job.revision_id)
-                            .where(
-                                SourceRevision.source_id == source.id,
-                                Job.state == "running",
-                                Job.lease_owner == owner,
-                            )
-                            .order_by(Job.id)
-                            .with_for_update(of=Job)
-                        )
-                    ).all()
-                )
+                all_jobs = await self._lock_source_index_jobs(session, source.id)
                 await self._lock_source_maintenance_jobs(session, source.id)
-                revisions = list(
-                    (
-                        await session.scalars(
-                            select(SourceRevision)
-                            .where(SourceRevision.id.in_([job.revision_id for job in jobs]))
-                            .order_by(SourceRevision.id)
-                            .with_for_update()
-                        )
-                    ).all()
-                ) if jobs else []
+                await self._lock_source_file_operations(session, source.id)
+                revisions = await self._lock_source_revisions(session, source.id)
+                jobs = [
+                    job
+                    for job in all_jobs
+                    if job.state == "running" and job.lease_owner == owner
+                ]
                 now = await self._database_now(session)
                 deleted = source.state != "active"
                 revision_by_id = {revision.id: revision for revision in revisions}
@@ -894,6 +971,20 @@ class SourceRepository:
             ).all()
         )
 
+    async def _lock_source_file_operations(
+        self, session: AsyncSession, source_id: uuid.UUID
+    ) -> list[SourceFileOperation]:
+        return list(
+            (
+                await session.scalars(
+                    select(SourceFileOperation)
+                    .where(SourceFileOperation.source_id == source_id)
+                    .order_by(SourceFileOperation.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
     async def _lock_revision_maintenance_jobs(
         self, session: AsyncSession, revision_id: uuid.UUID
     ) -> list[CoreMaintenanceJob]:
@@ -924,7 +1015,12 @@ class SourceRepository:
 
     async def _lock_maintenance_context(
         self, session: AsyncSession, job_id: uuid.UUID
-    ) -> tuple[SourceDocument, CoreMaintenanceJob, SourceRevision] | None:
+    ) -> tuple[
+        SourceDocument,
+        CoreMaintenanceJob,
+        SourceRevision,
+        list[SourceFileOperation],
+    ] | None:
         identity = await session.execute(
             select(CoreMaintenanceJob.source_id, CoreMaintenanceJob.revision_id)
             .where(CoreMaintenanceJob.id == job_id)
@@ -940,25 +1036,17 @@ class SourceRepository:
         )
         if source is None:
             raise SourceConflictError("Maintenance job references a missing source")
-        index_job = await session.scalar(
-            select(Job)
-            .where(Job.revision_id == revision_id, Job.kind == "index")
-            .with_for_update()
-        )
-        if index_job is None:
-            raise SourceConflictError("Maintenance job revision has no index job")
-        maintenance = await session.scalar(
-            select(CoreMaintenanceJob)
-            .where(CoreMaintenanceJob.id == job_id)
-            .with_for_update()
-        )
+        index_jobs = await self._lock_source_index_jobs(session, source.id)
+        maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+        file_operations = await self._lock_source_file_operations(session, source.id)
+        revisions = await self._lock_source_revisions(session, source.id)
+        index_job = next((job for job in index_jobs if job.revision_id == revision_id), None)
+        maintenance = next((job for job in maintenance_jobs if job.id == job_id), None)
+        revision = next((item for item in revisions if item.id == revision_id), None)
         if maintenance is None:
             return None
-        revision = await session.scalar(
-            select(SourceRevision)
-            .where(SourceRevision.id == revision_id)
-            .with_for_update()
-        )
+        if index_job is None:
+            raise SourceConflictError("Maintenance job revision has no index job")
         if revision is None:
             raise SourceConflictError("Maintenance job references a missing revision")
         if (
@@ -968,7 +1056,7 @@ class SourceRepository:
             or index_job.revision_id != revision.id
         ):
             raise SourceConflictError("Maintenance job revision changed source unexpectedly")
-        return source, maintenance, revision
+        return source, maintenance, revision, file_operations
 
     @staticmethod
     def _normalize_cleanup_chunks(chunk_ids: Sequence[str]) -> tuple[str, ...]:
@@ -1027,17 +1115,14 @@ class SourceRepository:
         )
         if source is None:
             raise SourceConflictError("Index revision references a missing source")
-        job = await session.scalar(
-            select(Job).where(Job.id == job_id).with_for_update()
-        )
+        index_jobs = await self._lock_source_index_jobs(session, source.id)
+        await self._lock_source_maintenance_jobs(session, source.id)
+        await self._lock_source_file_operations(session, source.id)
+        revisions = await self._lock_source_revisions(session, source.id)
+        job = next((candidate for candidate in index_jobs if candidate.id == job_id), None)
         if job is None:
             return None
-        await self._lock_revision_maintenance_jobs(session, revision_id)
-        revision = await session.scalar(
-            select(SourceRevision)
-            .where(SourceRevision.id == revision_id)
-            .with_for_update()
-        )
+        revision = next((candidate for candidate in revisions if candidate.id == revision_id), None)
         if revision is None:
             raise SourceConflictError("Index job references a missing revision")
         if job.revision_id != revision.id or revision.source_id != source.id:

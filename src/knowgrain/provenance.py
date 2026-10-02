@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
-import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
 from knowgrain.m3_types import (
     EligibleRevision,
     Evidence,
@@ -19,7 +18,7 @@ from knowgrain.m3_types import (
 )
 from knowgrain.parsers import DocumentParseError, ParsedDocument, parse_document
 from knowgrain.provenance_repository import ProvenanceRepository
-from knowgrain.vault import VaultPathError, VaultStore
+from knowgrain.vault import VaultStore
 
 
 _MAX_CANDIDATE_CHUNKS = 50
@@ -28,7 +27,6 @@ _MAX_EXCERPT_CHARS = 6_000
 _MAX_TOTAL_EVIDENCE_CHARS = 48_000
 _MAX_ORIGINAL_BYTES = 64 * 1024 * 1024
 _MAX_CHUNK_CHARS = 1_000_000
-_FILE_READ_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,44 +260,21 @@ class ProvenanceService:
     def _load_verified_original(
         vault: VaultStore, revision: EligibleRevision, byte_budget: int
     ) -> tuple[_VerifiedOriginal | None, int]:
-        """Read at most the remaining collection budget and parse in a worker thread."""
-        descriptor: int | None = None
+        """Safely capture at most the remaining budget, verify, and parse."""
         consumed = 0
+        if (
+            not isinstance(byte_budget, int)
+            or isinstance(byte_budget, bool)
+            or byte_budget < 1
+        ):
+            return None, 0
         try:
-            source_path = vault.resolve(revision.vault_path)
-            descriptor = os.open(
-                source_path,
-                os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0),
+            content, source_sha256 = EvidenceAccess(vault).capture_original(
+                revision.vault_path, byte_budget
             )
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > byte_budget:
-                return None, 0
-
-            contents: list[bytes] = []
-            remaining = metadata.st_size
-            with os.fdopen(descriptor, "rb", closefd=True) as source:
-                descriptor = None
-                while remaining:
-                    block = source.read(min(remaining, _FILE_READ_CHUNK_BYTES))
-                    if not block:
-                        return None, consumed
-                    contents.append(block)
-                    remaining -= len(block)
-                    consumed += len(block)
-                # A prefix with the recorded size is insufficient: concurrent
-                # append/replacement must not turn changed originals into proof.
-                if source.read(1):
-                    return None, consumed
-                final = os.fstat(source.fileno())
-                current = os.stat(source_path, follow_symlinks=False)
-                signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
-                                           value.st_mtime_ns, value.st_ctime_ns)
-                if signature(final) != signature(metadata) or signature(current) != signature(metadata):
-                    return None, consumed
-            content = b"".join(contents)
-            source_sha256 = hashlib.sha256(content).hexdigest()
+            # Budget is charged for the complete captured bytes even if their
+            # stored source hash or parsed representation has drifted.
+            consumed = len(content)
             if source_sha256 != revision.sha256:
                 return None, consumed
             parsed = parse_document(revision.filename, content)
@@ -310,17 +285,15 @@ class ProvenanceService:
                 _VerifiedOriginal(parsed=parsed),
                 consumed,
             )
-        except (OSError, ValueError, DocumentParseError, VaultPathError):
+        except EvidenceFileError as exc:
+            # A capture can fail its final identity check after reading the
+            # entire file; those bytes still consume this collection's budget.
+            return None, min(byte_budget, exc.captured_bytes)
+        except (OSError, ValueError, DocumentParseError):
             return None, consumed
         except Exception:
             # Parser and filesystem failures never expose source material to callers.
             return None, consumed
-        finally:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
 
     @staticmethod
     def _location_for_range(

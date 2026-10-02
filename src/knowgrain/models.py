@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -190,6 +191,74 @@ class CoreMaintenanceJob(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(String(4000))
     cleanup_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SourceFileOperation(Base):
+    """Durable archive or restore intent for one source lifecycle."""
+
+    __tablename__ = "source_file_operation"
+    __table_args__ = (
+        CheckConstraint("kind IN ('archive', 'restore')", name="ck_source_file_operation_kind"),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            name="ck_source_file_operation_state",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_source_file_operation_attempts_nonnegative"),
+        CheckConstraint(
+            "lifecycle_version >= 0", name="ck_source_file_operation_lifecycle_nonnegative"
+        ),
+        ForeignKeyConstraint(
+            ["source_id"],
+            ["source_document.id"],
+            name="fk_source_file_operation_source_id_source_document",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "source_id",
+            "lifecycle_version",
+            "kind",
+            name="uq_source_file_operation_source_lifecycle_kind",
+        ),
+        Index(
+            "ix_source_file_operation_state_lease_created",
+            "state",
+            "lease_until",
+            "created_at",
+        ),
+        Index(
+            "ix_source_file_operation_source_lifecycle_created",
+            "source_id",
+            "lifecycle_version",
+            "created_at",
+        ),
+        Index(
+            "uq_source_file_operation_pending_source",
+            "source_id",
+            unique=True,
+            postgresql_where=sql_text("state IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    lifecycle_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="queued", server_default="queued"
+    )
+    manifest: Mapped[list[dict]] = mapped_column(JSONB, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(4000))
+    expected_latest_revision_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    verified_current_revision_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

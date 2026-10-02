@@ -35,6 +35,11 @@ from knowgrain.provenance_repository import ProvenanceRepository
 from knowgrain.source_repository import SourceRepository, SourceConflictError, SourceNotFoundError
 from knowgrain.source_service import SourceService, InvalidUploadError
 from knowgrain.source_lifecycle_api import install_source_lifecycle_routes
+from knowgrain.source_file_api import install_source_file_routes
+from knowgrain.source_file_repository import SourceFileRepository
+from knowgrain.source_file_service import SourceFileService
+from knowgrain.source_file_runner import SourceFileRunner
+from knowgrain.source_archive_files import SourceArchiveFiles
 from knowgrain.vault import VaultStore
 from knowgrain.vault_setup import (
     VaultDatabaseUnavailable,
@@ -119,6 +124,9 @@ class ApplicationRuntime:
     sources: SourceService = field(init=False)
     jobs: IndexJobRunner = field(init=False)
     maintenance: CoreMaintenanceRunner = field(init=False)
+    source_files_repository: SourceFileRepository = field(init=False)
+    source_files: SourceFileService = field(init=False)
+    file_jobs: SourceFileRunner = field(init=False)
     wiki_repository: WikiRepository = field(init=False)
     wiki: WikiService = field(init=False)
     generation_repository: GenerationRepository = field(init=False)
@@ -131,16 +139,18 @@ class ApplicationRuntime:
     vault_error: str | None = field(default=None, init=False)
     initialization_error: str | None = field(default=None, init=False)
     _runtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _file_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     def __post_init__(self) -> None:
         self.lightrag = LightRAGRuntime(self.settings)
         self.database = ApplicationDatabase(self.settings)
         self.repository = SourceRepository(self.database)
+        self.source_files_repository = SourceFileRepository(self.database, self.repository)
         # Vault paths are resolved only after the app database is ready and the
         # setup service has rejected any symlink components in the chosen path.
         self.vault = VaultStore(Path.cwd())
         self.vault_setup = VaultSetupService(self.settings, self.database)
-        self.sources = SourceService(self.settings, self.repository, self.vault)
+        self._install_source_files(self.vault)
         self.jobs = IndexJobRunner(self.database, self.repository, self.vault, self.lightrag)
         self.maintenance = CoreMaintenanceRunner(self.database, self.repository, self.lightrag)
         self.wiki_repository = WikiRepository(self.database)
@@ -169,6 +179,7 @@ class ApplicationRuntime:
             # runner before setup touches files or installs new service references.
             await self.queries.stop()
             await self.generation.stop()
+            await self.file_jobs.stop()
             await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -189,6 +200,7 @@ class ApplicationRuntime:
                 self.vault_ready = True
                 self.vault_error = None
                 self.jobs.start()
+                self.file_jobs.start()
                 self.maintenance.start()
                 await self._start_wiki()
                 self.generation.start()
@@ -232,7 +244,7 @@ class ApplicationRuntime:
 
     def _install_vault(self, vault: VaultStore) -> None:
         self.vault = vault
-        self.sources = SourceService(self.settings, self.repository, vault)
+        self._install_source_files(vault)
         self.jobs = IndexJobRunner(self.database, self.repository, vault, self.lightrag)
         self.wiki = WikiService(vault, self.wiki_repository)
         self.generation = GenerationService(
@@ -245,6 +257,18 @@ class ApplicationRuntime:
         )
         self.entity_mapping = EntityMappingService(
             self.generation, EntityMappingRepository(self.database), self.lightrag, self.wiki,
+        )
+
+    def _install_source_files(self, vault: VaultStore) -> None:
+        self.source_files = SourceFileService(
+            self.source_files_repository, SourceArchiveFiles(vault), self._file_lock,
+        )
+        self.sources = SourceService(
+            self.settings, self.repository, vault, file_service=self.source_files,
+        )
+        self.file_jobs = SourceFileRunner(
+            self.database, self.source_files_repository, self.source_files,
+            vault_ready=lambda: self.vault_ready,
         )
 
     async def _start_wiki(self) -> None:
@@ -282,6 +306,7 @@ class ApplicationRuntime:
             self.vault_error = "Vault selection is being applied."
             await self.queries.stop()
             await self.generation.stop()
+            await self.file_jobs.stop()
             await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -303,6 +328,7 @@ class ApplicationRuntime:
             self.vault_ready = True
             self.vault_error = None
             self.jobs.start()
+            self.file_jobs.start()
             self.maintenance.start()
             await self._start_wiki()
             self.generation.start()
@@ -328,6 +354,7 @@ class ApplicationRuntime:
         try:
             await self.queries.stop()
             await self.generation.stop()
+            await self.file_jobs.stop()
             await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -412,6 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_entity_mapping_routes(app)
     install_source_lifecycle_routes(app)
     install_core_maintenance_routes(app)
+    install_source_file_routes(app)
 
     @app.middleware("http")
     async def validate_write_origin(request: Request, call_next):

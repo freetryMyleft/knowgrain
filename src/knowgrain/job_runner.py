@@ -117,7 +117,8 @@ class IndexJobRunner:
     async def _index(self, job: dict) -> None:
         try:
             content = await self._thread_drained(
-                EvidenceAccess(self.vault).original_revision, job["vault_path"], job["sha256"]
+                EvidenceAccess(self.vault).original_revision, job["vault_path"], job["sha256"],
+                allow_archived=False,
             )
         except EvidenceFileError:
             raise SourceChangedError("Vault 原件缺失、无法安全读取或与修订哈希不一致；请检查原件后重试") from None
@@ -214,9 +215,9 @@ class IndexJobRunner:
         return cancelled
 
     @staticmethod
-    async def _thread_drained(function, *args):
+    async def _thread_drained(function, *args, **kwargs):
         """Keep file/parse workers owned until completion, including cancellation."""
-        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
         cancelled = False
         while True:
             try:

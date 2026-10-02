@@ -81,7 +81,7 @@ ollama list
 1. 安装 Git、Docker Desktop、Python 3.12、`uv`、Node.js 22.12+（或 24 LTS）、Ollama。在 macOS 上可用各工具官方安装包；Obsidian 按需要安装。
 2. 用 `docker version`、`docker compose version`、`python3 --version`、`uv --version`、`node --version`、`npm --version` 检查工具可用。
 3. 在仓库根目录执行 `uv sync --locked` 安装当前 Python 依赖。
-4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0011_m5_core_maintenance`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。0011 为已删除来源建立持久化清理任务，启动后会通过内嵌 Core 清理派生索引；原件和已审阅 Wiki 保留。
+4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0012_source_file_operations`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。0011 为已删除来源建立持久化清理任务，启动后会通过内嵌 Core 清理派生索引；原件和已审阅 Wiki 保留。0012 记录全部修订的归档/恢复意图；清理完成后原件进入同一 Vault 的 `Trash/Files`，恢复时核验并搬回；历史原件下载支持确切归档路径。文件任务仅需应用库/Vault，不依赖模型就绪。
 5. 在 `.env` 设置 `VAULT_ROOT`（默认 `./data/vault`），启动 Ollama 并执行 `make models` 下载示例模型，再运行 `make demo` 验证 LightRAG Core 的最小导入与结构化检索。`make api` 启动常驻进程；使用 `/docs` 或 README 的 curl 上传资料、查看修订/任务和重试。手动 Wiki 操作仅依赖应用数据库和 Vault；生成和问答需要本机模型联通。第三方模型切换属于后续实现。
 
 当前可执行的开发启动命令如下；`docker compose` 要求 Docker Desktop 已启动，Ollama 也必须已启动：
@@ -107,7 +107,7 @@ curl -i http://127.0.0.1:8787/api/v1/health/ready
 
 `/api/v1/health/live` 在服务进程正常响应时返回 200；`/api/v1/health/ready` 检查 LightRAG、两个 PostgreSQL 数据库、Ollama 模型与 Vault 初始化状态，依赖不全时返回 503。启动与显式重试会调用一次 Embedding 模型并检查实测向量维度，常规就绪探测不会执行模型推理。Swagger 页面位于 `http://127.0.0.1:8787/docs`。应用数据库迁移完成且 Vault 可写时，模型缺失不会阻止原件上传，任务等待模型就绪后处理。
 
-Web 安装和构建：`make web-sync`、`make web-build`，随后 `make api`；在 `http://127.0.0.1:8787/` 打开资料页面，点击 **Wiki** 浏览和编辑 Markdown。开发时可另开终端 `make web` 使用 Vite。页面直接连接真实资料/任务/Wiki API；问答、生成和审阅尚待实现。当前 Compose 只运行 PostgreSQL，完整产品发布镜像仍待 M6。
+Web 安装和构建：`make web-sync`、`make web-build`，随后 `make api`；在 `http://127.0.0.1:8787/` 打开资料页面，点击 **Wiki** 浏览和编辑 Markdown。开发时可另开终端 `make web` 使用 Vite。页面直接连接真实资料/任务/Wiki API；已有问答、证据、生成、审阅和更新提案。完整图谱、恢复重建工具、安装向导和第三方模型设置仍待实现。当前 Compose 只运行 PostgreSQL，完整产品发布镜像仍待 M6。
 
 LightRAG 的 tiktoken 词表也需要首次联网准备：`make tokenizer` 下载固定词表并校验 SHA-256，默认缓存目录 `./data/tokenizers`。API 启动只检查本地缓存，缺失时不会隐式下载并阻塞事件循环。模型、Python/npm 依赖和词表都准备好后，本地资料处理可断网运行；离线迁移需复制这些运行资源。
 

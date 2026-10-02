@@ -42,6 +42,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(runtime.repository, "claim_job", side_effect=claim) as claim_job,
                 patch.object(runtime.repository, "release_owner", new_callable=AsyncMock),
                 patch.object(runtime.repository, "release_maintenance_owner", new_callable=AsyncMock),
+                patch.object(runtime.source_files_repository, "release_file_owner", new_callable=AsyncMock),
                 patch.object(runtime.lightrag, "start", new_callable=AsyncMock),
             ):
                 await runtime.initialize()
@@ -57,6 +58,9 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(runtime.repository, "release_owner", new_callable=AsyncMock),
                     patch.object(runtime.repository, "claim_maintenance", new_callable=AsyncMock, return_value=None),
                     patch.object(runtime.repository, "release_maintenance_owner", new_callable=AsyncMock),
+                    patch.object(runtime.source_files_repository, "claim_file_operation", new_callable=AsyncMock, return_value=None),
+                    patch.object(runtime.source_files_repository, "enqueue_cleaned_sources", new_callable=AsyncMock, return_value=0),
+                    patch.object(runtime.source_files_repository, "release_file_owner", new_callable=AsyncMock),
                     patch.object(runtime.lightrag, "start", new_callable=AsyncMock),
                 ):
                     # A usable Core lets the runner claim once Vault is repaired.
@@ -75,6 +79,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(runtime.vault_ready)
                     self.assertIsNone(runtime.jobs._task)
                     self.assertIsNone(runtime.maintenance._task)
+                    self.assertIsNone(runtime.file_jobs._task)
             finally:
                 runtime.lightrag._rag = None
                 runtime.database.is_ready = False
@@ -95,6 +100,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(runtime.jobs, "stop", stop),
                 patch.object(runtime.maintenance, "stop", new_callable=AsyncMock),
+                patch.object(runtime.file_jobs, "stop", new_callable=AsyncMock),
                 patch.object(
                     runtime.vault_setup,
                     "validate_selection",
@@ -132,6 +138,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(runtime.queries, "stop", side_effect=stopped("queries")),
             patch.object(runtime.generation, "stop", side_effect=stopped("generation")),
+            patch.object(runtime.file_jobs, "stop", side_effect=stopped("files")),
             patch.object(runtime.maintenance, "stop", side_effect=stopped("maintenance")),
             patch.object(runtime.jobs, "stop", side_effect=stopped("index")),
             patch.object(runtime.wiki, "stop", side_effect=stopped("wiki")),
@@ -139,4 +146,4 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(runtime.database, "close", side_effect=stopped("database")),
         ):
             await runtime.close()
-        self.assertEqual(events, ["queries", "generation", "maintenance", "index", "wiki", "core", "database"])
+        self.assertEqual(events, ["queries", "generation", "files", "maintenance", "index", "wiki", "core", "database"])

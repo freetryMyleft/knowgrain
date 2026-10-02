@@ -422,7 +422,13 @@ class PostgresSourcesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(preview.status_code, 200, preview.text)
                 self.assertEqual(
                     preview.json()["create_directories"],
-                    ["Sources/Files", "Sources/Evidence", "Wiki/Drafts", "Wiki/Pages"],
+                    [
+                        "Sources/Files",
+                        "Sources/Evidence",
+                        "Wiki/Drafts",
+                        "Wiki/Pages",
+                        "Trash/Files",
+                    ],
                 )
                 self.assertFalse((self.settings.vault_parent_dir / "Selected").exists())
                 selected = await client.post(

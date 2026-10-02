@@ -25,15 +25,18 @@ _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_ORIGINAL_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".pdf", ".docx"})
 
 
 class EvidenceFileError(RuntimeError):
     """A retained evidence file is missing, changed, or unsafe to access."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, captured_bytes: int = 0) -> None:
         if code not in {"missing", "conflict", "unavailable"}:
             raise ValueError("invalid evidence file error code")
         self.code = code
+        # Internal resource accounting; never included in public responses.
+        self.captured_bytes = captured_bytes
         messages = {
             "missing": "Evidence file is missing.",
             "conflict": "Evidence file differs from its retained revision.",
@@ -63,19 +66,83 @@ class EvidenceAccess:
     def original(self, evidence: Evidence) -> tuple[bytes, str]:
         self._canonical_markdown(evidence)  # Validate the retained evidence identity and fields.
         relative = evidence.vault_path
-        captured, digest = self._capture(relative, _MAX_ORIGINAL_BYTES)
+        captured, digest = self.capture_original(relative, _MAX_ORIGINAL_BYTES)
         if digest != evidence.source_sha256:
             raise EvidenceFileError("conflict")
         return captured, evidence.filename
 
-    def original_revision(self, relative: str, expected_sha256: str) -> bytes:
+    def original_revision(
+        self,
+        relative: str,
+        expected_sha256: str,
+        *,
+        allow_archived: bool = True,
+    ) -> bytes:
         """Read a bounded Vault file and verify it matches a retained revision."""
         if not isinstance(expected_sha256, str) or not _SHA256_PATTERN.fullmatch(expected_sha256):
             raise EvidenceFileError("unavailable")
-        captured, digest = self._capture(relative, _MAX_ORIGINAL_BYTES)
+        captured, digest = self.capture_original(
+            relative, _MAX_ORIGINAL_BYTES, allow_archived=allow_archived
+        )
         if digest != expected_sha256:
             raise EvidenceFileError("conflict")
         return captured
+
+    def capture_original(
+        self,
+        relative: str,
+        maximum_bytes: int,
+        *,
+        allow_archived: bool = True,
+    ) -> tuple[bytes, str]:
+        """Capture an original, optionally following its exact archived location.
+
+        Trash fallback is limited to a canonical source revision and only occurs
+        when the canonical path is missing. Symlink/path conflicts and unsafe
+        nodes never redirect a read to Trash.
+        """
+        if (
+            not isinstance(maximum_bytes, int)
+            or isinstance(maximum_bytes, bool)
+            or not 1 <= maximum_bytes <= MAX_UPLOAD_BYTES
+            or not isinstance(allow_archived, bool)
+        ):
+            raise EvidenceFileError("unavailable")
+        try:
+            return self._capture(relative, maximum_bytes)
+        except EvidenceFileError as exc:
+            if exc.code != "missing" or not allow_archived:
+                raise
+            archived = self._archived_original_path(relative)
+            if archived is None:
+                raise
+            return self._capture(archived, maximum_bytes)
+
+    @staticmethod
+    def _archived_original_path(relative: str) -> str | None:
+        """Return the one exact Trash path for a strictly canonical original."""
+        if not isinstance(relative, str):
+            return None
+        parts = relative.split("/")
+        if len(parts) != 4 or parts[:2] != ["Sources", "Files"]:
+            return None
+        source_text, filename = parts[2:]
+        if "." not in filename:
+            return None
+        revision_text, suffix = filename.rsplit(".", 1)
+        suffix = "." + suffix
+        if suffix not in _ORIGINAL_SUFFIXES:
+            return None
+        try:
+            source_id = UUID(source_text)
+            revision_id = UUID(revision_text)
+        except (ValueError, AttributeError):
+            return None
+        if str(source_id) != source_text or str(revision_id) != revision_text:
+            return None
+        if relative != f"Sources/Files/{source_id}/{revision_id}{suffix}":
+            return None
+        return f"Trash/Files/{source_id}/{revision_id}{suffix}"
 
     def markdown(self, evidence: Evidence) -> bytes:
         relative, expected = self._canonical_markdown(evidence)
@@ -117,6 +184,7 @@ class EvidenceAccess:
             if exc.errno == errno.ELOOP:
                 raise EvidenceFileError("unavailable") from None
             raise EvidenceFileError("unavailable") from None
+        data = bytearray()
         try:
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode) or before.st_size > maximum_bytes:
@@ -128,7 +196,6 @@ class EvidenceAccess:
             if not self._same_file_identity(before, path_before):
                 raise EvidenceFileError("conflict")
 
-            data = bytearray()
             digest = hashlib.sha256()
             while True:
                 block = os.read(descriptor, min(_READ_CHUNK_BYTES, maximum_bytes + 1 - len(data)))
@@ -147,6 +214,11 @@ class EvidenceAccess:
             if not self._same_stat(before, after) or not self._same_file_identity(after, path_after):
                 raise EvidenceFileError("conflict")
             return bytes(data), digest.hexdigest()
+        except EvidenceFileError as exc:
+            exc.captured_bytes = len(data)
+            raise
+        except OSError:
+            raise EvidenceFileError("unavailable", captured_bytes=len(data)) from None
         finally:
             os.close(descriptor)
             os.close(parent_fd)

@@ -30,6 +30,7 @@ class VaultStore:
         "Sources/Evidence",
         "Wiki/Drafts",
         "Wiki/Pages",
+        "Trash/Files",
     )
 
     def __init__(self, root: Path) -> None:

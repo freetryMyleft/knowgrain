@@ -97,6 +97,23 @@ class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
     def runner(self, model):
         return IndexJobRunner(None, self.repository, self.vault, model)
 
+    async def test_archived_original_is_not_used_for_new_indexing(self):
+        from knowgrain.source_archive_files import ArchiveEntry, SourceArchiveFiles
+        from knowgrain.evidence_access import EvidenceAccess
+        job = self.job(b"retained historical evidence")
+        SourceArchiveFiles(self.vault).archive(self.source_id, (
+            ArchiveEntry(self.revision_id, job["vault_path"], job["sha256"]),
+        ))
+        self.assertEqual(
+            EvidenceAccess(self.vault).original_revision(job["vault_path"], job["sha256"]),
+            b"retained historical evidence",
+        )
+        model = ModelStub()
+        await self.runner(model)._execute(job)
+        self.assertEqual(model.calls, [])
+        self.assertIsNone(self.repository.completion)
+        self.assertIn("Vault", self.repository.failure)
+
     async def test_model_failure_keeps_original_and_marks_failed(self):
         original = "# 本地资料\n\n可核实的原文。".encode()
         job = self.job(original)
@@ -190,7 +207,7 @@ class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
         finished = threading.Event()
 
-        def delayed_read(*args):
+        def delayed_read(*args, **kwargs):
             started.set()
             release.wait(5)
             finished.set()

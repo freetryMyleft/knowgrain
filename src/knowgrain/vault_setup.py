@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
-import stat
 import sys
 import tempfile
 import unicodedata
@@ -15,7 +13,8 @@ from uuid import UUID
 
 from knowgrain.config import Settings
 from knowgrain.database import ApplicationDatabase, VaultBindingConflict
-from knowgrain.vault import VaultPathError, VaultStore
+from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
+from knowgrain.vault import VaultStore
 from knowgrain.wiki_files import WikiFileStore
 
 
@@ -24,6 +23,7 @@ VAULT_DIRECTORIES = (
     "Sources/Evidence",
     "Wiki/Drafts",
     "Wiki/Pages",
+    "Trash/Files",
 )
 
 
@@ -380,39 +380,32 @@ class VaultSetupService:
     @staticmethod
     def _verify_originals_sync(root: Path, originals: list[tuple[str, str]]) -> None:
         vault = VaultStore(root)
+        evidence_access = EvidenceAccess(vault)
         try:
             for relative_path, expected_digest in originals:
-                path = vault.resolve(relative_path)
                 if not _valid_digest(expected_digest):
                     raise VaultPathSetupError(
                         "A stored source record has an invalid SHA-256 digest; Vault adoption is blocked."
                     )
-                descriptor = os.open(
-                    path,
-                    os.O_RDONLY
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0),
-                )
                 try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    evidence_access.original_revision(
+                        relative_path,
+                        expected_digest,
+                        allow_archived=True,
+                    )
+                except EvidenceFileError as exc:
+                    if exc.code == "missing":
                         raise VaultPathSetupError(
-                            "A stored source original is not a regular file; Vault adoption is blocked."
-                        )
-                    digest = hashlib.sha256()
-                    with os.fdopen(descriptor, "rb", closefd=False) as source:
-                        while chunk := source.read(1024 * 1024):
-                            digest.update(chunk)
-                    if digest.hexdigest() != expected_digest:
-                        raise VaultPathSetupError(
-                            "A stored source original is missing or its SHA-256 does not match; Vault adoption is blocked."
-                        )
-                finally:
-                    os.close(descriptor)
+                            "A stored source original is missing; Vault adoption is blocked."
+                        ) from exc
+                    raise VaultPathSetupError(
+                        "A stored source original could not be safely verified; Vault adoption is blocked."
+                    ) from exc
         except FileNotFoundError as exc:
             raise VaultPathSetupError(
                 "A stored source original is missing; Vault adoption is blocked."
             ) from exc
-        except (VaultPathError, OSError) as exc:
+        except OSError as exc:
             if isinstance(exc, VaultPathSetupError):
                 raise
             raise VaultPathSetupError(

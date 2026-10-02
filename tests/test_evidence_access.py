@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from knowgrain.config import MAX_UPLOAD_BYTES
 from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
 from knowgrain.generation_contract import render_evidence
 from knowgrain.m3_types import Evidence, evidence_identity
@@ -188,6 +189,113 @@ class EvidenceAccessTests(unittest.TestCase):
                     self.vault_path, hashlib.sha256(self.source_bytes).hexdigest()
                 )
             self.assertEqual(fifo_error.exception.code, "unavailable")
+
+    def test_canonical_original_reads_only_its_exact_archived_path(self) -> None:
+        original_path = self.vault.resolve(self.vault_path)
+        archived_path = self.vault.resolve(
+            self.vault_path.replace("Sources/Files", "Trash/Files", 1)
+        )
+        archived_path.parent.mkdir(parents=True)
+        original_path.replace(archived_path)
+        digest = hashlib.sha256(self.source_bytes).hexdigest()
+
+        captured = self.files.original_revision(self.vault_path, digest)
+
+        self.assertEqual(captured, self.source_bytes)
+        with self.assertRaises(EvidenceFileError) as disabled:
+            self.files.original_revision(
+                self.vault_path, digest, allow_archived=False
+            )
+        self.assertEqual(disabled.exception.code, "missing")
+        with self.assertRaises(EvidenceFileError) as wrong_hash:
+            self.files.original_revision(self.vault_path, "0" * 64)
+        self.assertEqual(wrong_hash.exception.code, "conflict")
+
+    def test_original_symlink_cannot_redirect_capture_to_trash(self) -> None:
+        original_path = self.vault.resolve(self.vault_path)
+        archived_path = self.vault.resolve(
+            self.vault_path.replace("Sources/Files", "Trash/Files", 1)
+        )
+        archived_path.parent.mkdir(parents=True)
+        archived_path.write_bytes(self.source_bytes)
+        outside = Path(self.temporary.name) / "outside.txt"
+        outside.write_bytes(self.source_bytes)
+        original_path.unlink()
+        original_path.symlink_to(outside)
+
+        with self.assertRaises(EvidenceFileError) as error:
+            self.files.original_revision(
+                self.vault_path,
+                hashlib.sha256(self.source_bytes).hexdigest(),
+            )
+
+        self.assertEqual(error.exception.code, "unavailable")
+
+    def test_conflicting_canonical_original_never_falls_back_to_trash(self) -> None:
+        original_path = self.vault.resolve(self.vault_path)
+        archived_path = self.vault.resolve(
+            self.vault_path.replace("Sources/Files", "Trash/Files", 1)
+        )
+        archived_path.parent.mkdir(parents=True)
+        archived_path.write_bytes(self.source_bytes)
+        original_path.write_bytes(b"changed canonical bytes")
+
+        with self.assertRaises(EvidenceFileError) as error:
+            self.files.original_revision(
+                self.vault_path,
+                hashlib.sha256(self.source_bytes).hexdigest(),
+            )
+
+        self.assertEqual(error.exception.code, "conflict")
+
+    def test_evidence_markdown_does_not_use_trash_fallback(self) -> None:
+        self.files.publish((self.evidence,))
+        evidence_path = self.vault.resolve(
+            f"Sources/Evidence/{self.evidence.evidence_id}.md"
+        )
+        evidence_path.unlink()
+        trash_path = self.vault.resolve(
+            f"Trash/Files/{self.evidence.source_id}/{self.evidence.evidence_id}.md"
+        )
+        trash_path.parent.mkdir(parents=True)
+        trash_path.write_bytes(render_evidence(self.evidence).encode("utf-8"))
+
+        with self.assertRaises(EvidenceFileError) as error:
+            self.files.markdown(self.evidence)
+
+        self.assertEqual(error.exception.code, "missing")
+
+    def test_capture_original_rejects_invalid_budgets_and_still_rejects_fifos(self) -> None:
+        for budget in (0, True, MAX_UPLOAD_BYTES + 1, 1.5):
+            with self.subTest(budget=budget), self.assertRaises(EvidenceFileError):
+                self.files.capture_original(self.vault_path, budget)
+
+        original_path = self.vault.resolve(self.vault_path)
+        original_path.unlink()
+        os.mkfifo(original_path)
+        with self.assertRaises(EvidenceFileError) as error:
+            self.files.capture_original(self.vault_path, 1024)
+        self.assertEqual(error.exception.code, "unavailable")
+
+    def test_noncanonical_legacy_path_is_readable_but_never_gets_trash_fallback(self) -> None:
+        legacy_relative = "Sources/Files/source/revision.txt"
+        legacy_path = self.vault.resolve(legacy_relative)
+        legacy_path.parent.mkdir(parents=True)
+        legacy_path.write_bytes(self.source_bytes)
+        digest = hashlib.sha256(self.source_bytes).hexdigest()
+
+        self.assertEqual(
+            self.files.original_revision(legacy_relative, digest), self.source_bytes
+        )
+        legacy_path.unlink()
+        archived_legacy = self.vault.resolve(
+            "Trash/Files/source/revision.txt"
+        )
+        archived_legacy.parent.mkdir(parents=True)
+        archived_legacy.write_bytes(self.source_bytes)
+        with self.assertRaises(EvidenceFileError) as missing:
+            self.files.original_revision(legacy_relative, digest)
+        self.assertEqual(missing.exception.code, "missing")
 
     def test_large_registered_original_remains_readable_after_upload_limit_changes(self) -> None:
         # A retained revision can exceed today's default 20 MiB upload limit.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import hashlib
@@ -97,6 +98,55 @@ class ProvenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repository.path_calls, [[revision.vault_path]])
         await service.validate(items)
         self.assertEqual(repository.id_calls, [[revision.revision_id]])
+
+    async def test_collect_and_validate_can_capture_an_exact_archived_original(self):
+        content = b"A quote retained while the original is archived."
+        revision = self.make_revision("notes.txt", content)
+        source_path = self.vault.resolve(revision.vault_path)
+        archived_path = self.vault.resolve(
+            revision.vault_path.replace("Sources/Files", "Trash/Files", 1)
+        )
+        archived_path.parent.mkdir(parents=True)
+        source_path.replace(archived_path)
+        service = ProvenanceService(RepositoryStub([revision]), self.vault)
+
+        evidence = await service.collect(
+            self.response(
+                {
+                    "file_path": revision.vault_path,
+                    "chunk_id": "archived-chunk",
+                    "content": content.decode(),
+                }
+            )
+        )
+
+        self.assertEqual(evidence[0].vault_path, revision.vault_path)
+        await service.validate(evidence)
+
+    async def test_source_hash_mismatch_still_consumes_captured_byte_budget(self):
+        content = b"Wrong source hashes still cost the bytes read."
+        revision = self.make_revision("notes.txt", content)
+        wrong_hash = replace(revision, sha256="0" * 64)
+
+        original, consumed = await asyncio.to_thread(
+            ProvenanceService._load_verified_original,
+            self.vault,
+            wrong_hash,
+            len(content),
+        )
+
+        self.assertIsNone(original)
+        self.assertEqual(consumed, len(content))
+
+    async def test_failed_final_file_identity_check_still_consumes_capture_budget(self):
+        content = b"Final identity checks can reject already-read bytes."
+        revision = self.make_revision("notes.txt", content)
+        with patch("knowgrain.evidence_access.EvidenceAccess._same_stat", return_value=False):
+            original, consumed = ProvenanceService._load_verified_original(
+                self.vault, revision, len(content),
+            )
+        self.assertIsNone(original)
+        self.assertEqual(consumed, len(content))
 
     async def test_stored_revision_resolves_basename_but_unknown_id_cannot_fallback(self):
         revision = self.make_revision("notes.txt", b"Verified original.")
@@ -321,7 +371,7 @@ class ProvenanceServiceTests(unittest.IsolatedAsyncioTestCase):
                     source.write(b" appended after the initial stat")
             return metadata
 
-        with patch("knowgrain.provenance.os.fstat", side_effect=append_after_stat):
+        with patch("knowgrain.evidence_access.os.fstat", side_effect=append_after_stat):
             with self.assertRaises(EvidenceUnavailableError):
                 await service.collect(
                     self.response(
@@ -356,10 +406,20 @@ class ProvenanceServiceTests(unittest.IsolatedAsyncioTestCase):
 
         def replace_before_path_stat(path, *args, **kwargs):
             nonlocal replaced
+            directory_fd = kwargs.get("dir_fd")
+            is_original_parent = False
+            if directory_fd is not None:
+                directory_stat = original_fstat(directory_fd)
+                parent_stat = original_stat(source_path.parent)
+                is_original_parent = (
+                    directory_stat.st_dev == parent_stat.st_dev
+                    and directory_stat.st_ino == parent_stat.st_ino
+                )
             if (
                 descriptor_was_statted
                 and kwargs.get("follow_symlinks") is False
-                and os.fspath(path) == os.fspath(source_path)
+                and os.fspath(path) == source_path.name
+                and is_original_parent
                 and not replaced
             ):
                 replaced = True
@@ -367,8 +427,8 @@ class ProvenanceServiceTests(unittest.IsolatedAsyncioTestCase):
             return original_stat(path, *args, **kwargs)
 
         with (
-            patch("knowgrain.provenance.os.fstat", side_effect=arm_after_descriptor_stat),
-            patch("knowgrain.provenance.os.stat", side_effect=replace_before_path_stat),
+            patch("knowgrain.evidence_access.os.fstat", side_effect=arm_after_descriptor_stat),
+            patch("knowgrain.evidence_access.os.stat", side_effect=replace_before_path_stat),
         ):
             with self.assertRaises(EvidenceUnavailableError):
                 await service.collect(

@@ -68,9 +68,9 @@ Compose 使用 PostgreSQL 18，数据卷挂载到 `/var/lib/postgresql`，遵循
 
 ## 导入资料与查看任务
 
-先执行 `make migrate`（当前迁移为 `0011_m5_core_maintenance`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
+先执行 `make migrate`（当前迁移为 `0012_source_file_operations`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/`、`Wiki/Pages/` 和 `Trash/Files/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
 
-删除来源会立即停止新问答使用其证据，并排队清理 LightRAG 派生索引；资料详情显示各修订的清理状态及失败重试。原件和 Wiki 保留。已开始清理的来源恢复后会重新排队索引，完成前没有当前索引；清理仍运行时恢复返回冲突。升级前请备份数据库和 Vault，迁移会为已删除来源补建清理任务。
+删除来源会立即停止新问答使用其证据，并排队清理 LightRAG 派生索引；资料详情显示各修订的清理状态及失败重试。全部修订清理成功后，原件目录移入 Vault 的 `Trash/Files/{source_id}/`，Wiki 和证据摘录保留。资料详情显示归档/恢复进度和失败重试；历史证据下载仍核验准确修订哈希。恢复先核验并搬回全部原件，再激活来源和排队重索引，完成前没有当前索引；清理或文件任务仍运行时恢复返回冲突。升级前请备份数据库和 Vault，0011 补建清理任务，0012 补建已清理来源的归档日志；启动后的执行器会处理这些日志。Obsidian 指向原件的相对链接在归档期间可能暂时失效，恢复后回到原路径；已审阅正文不会改写。当前没有永久删除入口。详见 [Trash 验收](docs/verification/m5-trash-recovery-2026-10-02.md)。
 
 Web 顶部的 **Vault 设置** 可以预览和选择 `VAULT_PARENT_DIR` 下的一个文件夹（默认父目录 `./data/vaults`）。只输入文件夹名称，先查看哪些目录已存在、哪些将创建，再点击“使用此 Vault”。预览不写入文件；选择结果保存到应用数据库，重启时使用该绑定，后续改 `VAULT_ROOT` 不会覆盖选择。已有资料或 Wiki 后位置锁定，不能通过设置移动资料；后续迁移/恢复需专门流程。
 

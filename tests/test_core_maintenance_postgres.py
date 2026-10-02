@@ -14,6 +14,7 @@ from knowgrain.config import Settings
 from knowgrain.database import ApplicationDatabase
 from knowgrain.models import CoreMaintenanceJob, Job, SourceDocument, SourceRevision
 from knowgrain.source_repository import SourceConflictError, SourceRepository
+from knowgrain.source_file_repository import SourceFileRepository
 from knowgrain.source_service import SourceService
 from knowgrain.vault import VaultStore
 
@@ -45,6 +46,7 @@ class PostgresCoreMaintenanceTests(unittest.IsolatedAsyncioTestCase):
             await self.database.close()
             self.skipTest("fixture database must start without source rows or a Vault binding")
         self.repository = SourceRepository(self.database)
+        self.file_repository = SourceFileRepository(self.database, self.repository)
         self.vault = VaultStore(self.settings.vault_root)
         self.vault.initialize()
         self.service = SourceService(self.settings, self.repository, self.vault)
@@ -173,11 +175,25 @@ class PostgresCoreMaintenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revision_after_cleanup["indexed_at"], original["indexed_at"])
         self.assertEqual(revision_after_cleanup["error"], "已清理索引，恢复后将重建")
 
-        restored = await self.repository.restore_source(
+        with self.assertRaises(SourceConflictError):
+            await self.repository.restore_source(
+                result.source_id,
+                expected_lifecycle_version=1,
+                expected_latest_revision_id=result.revision_id,
+                verified_current_revision_id=result.revision_id,
+            )
+        prepared_restore = await self.file_repository.prepare_restore(
             result.source_id,
             expected_lifecycle_version=1,
             expected_latest_revision_id=result.revision_id,
-            verified_current_revision_id=result.revision_id,
+        )
+        restore_owner = uuid4()
+        restore_claim = await self.file_repository.claim_file_operation(
+            restore_owner, operation_id=UUID(prepared_restore["operation_id"])
+        )
+        self.assertEqual(restore_claim["kind"], "restore")
+        restored = await self.file_repository.complete_file_operation(
+            UUID(restore_claim["operation_id"]), restore_owner
         )
         self.assertEqual((restored["state"], restored["lifecycle_version"]), ("active", 2))
         self.assertIsNone(restored["current_revision_id"])

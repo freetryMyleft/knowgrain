@@ -112,7 +112,7 @@ class VaultSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview["directories"], list(VAULT_DIRECTORIES))
         self.assertEqual(
             preview["create_directories"],
-            ["Sources/Evidence", "Wiki/Drafts", "Wiki/Pages"],
+            ["Sources/Evidence", "Wiki/Drafts", "Wiki/Pages", "Trash/Files"],
         )
         self.assertEqual(list((target / "Sources").iterdir()), [target / "Sources" / "Files"])
 
@@ -205,6 +205,46 @@ class VaultSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(binding["root_path"], str(self.configured))
         self.assertEqual(vault.read_bytes(relative), content)
         self.assertTrue((self.configured / "Wiki/Pages").is_dir())
+
+    async def test_archived_canonical_original_keeps_vault_startup_ready(self):
+        source_id = uuid4()
+        revision_id = uuid4()
+        content = b"The exact archived revision must verify at startup."
+        vault = VaultStore(self.configured)
+        vault.initialize()
+        relative = vault.write_source(source_id, revision_id, "notes.txt", content)
+        source_directory = self.configured / "Sources" / "Files" / str(source_id)
+        trash_directory = self.configured / "Trash" / "Files"
+        trash_directory.mkdir(parents=True, exist_ok=True)
+        source_directory.rename(trash_directory / str(source_id))
+        self.database.source_count = 1
+        self.database.originals = [(relative, hashlib.sha256(content).hexdigest())]
+
+        bound_vault, binding = await self.service.initialize()
+        status = await self.service.status(ready=True, detail=None)
+
+        self.assertEqual(binding["root_path"], str(self.configured))
+        self.assertEqual(bound_vault.root, self.configured)
+        self.assertTrue(status["ready"])
+        self.assertFalse(status["selection_enabled"])
+
+    async def test_changed_archived_original_still_blocks_vault_startup(self):
+        source_id = uuid4()
+        revision_id = uuid4()
+        content = b"Archived content that no longer matches metadata."
+        vault = VaultStore(self.configured)
+        vault.initialize()
+        relative = vault.write_source(source_id, revision_id, "notes.txt", content)
+        source_directory = self.configured / "Sources" / "Files" / str(source_id)
+        trash_directory = self.configured / "Trash" / "Files"
+        trash_directory.mkdir(parents=True, exist_ok=True)
+        source_directory.rename(trash_directory / str(source_id))
+        self.database.source_count = 1
+        self.database.originals = [(relative, hashlib.sha256(b"different").hexdigest())]
+
+        with self.assertRaises(VaultPathSetupError):
+            await self.service.initialize()
+        self.assertIsNone(self.database.binding)
 
     async def test_changed_legacy_original_fails_closed_before_directory_creation(self):
         relative = "Sources/Files/source/revision.txt"

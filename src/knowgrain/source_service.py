@@ -3,6 +3,7 @@ import hashlib
 from contextlib import suppress
 from pathlib import PurePosixPath
 from uuid import UUID
+from typing import TYPE_CHECKING
 
 from knowgrain.config import Settings
 from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
@@ -13,6 +14,9 @@ from knowgrain.source_repository import (
     SourceRepository,
 )
 from knowgrain.vault import VaultStore
+
+if TYPE_CHECKING:
+    from knowgrain.source_file_service import SourceFileService
 
 SUPPORTED_MEDIA_TYPES = {
     ".md": "text/markdown",
@@ -39,9 +43,9 @@ _SOURCE_FILE_UNAVAILABLE_MESSAGE = (
 )
 
 
-async def _thread_call_drained(function, *args):
+async def _thread_call_drained(function, *args, **kwargs):
     """Join Vault I/O threads before cancellation can release a runtime lock."""
-    worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     cancelled = False
     while True:
         try:
@@ -70,11 +74,13 @@ class SourceService:
         repository: SourceRepository,
         vault: VaultStore,
         evidence_access: EvidenceAccess | None = None,
+        file_service: "SourceFileService | None" = None,
     ):
         self.settings = settings
         self.repository = repository
         self.vault = vault
         self.evidence_access = evidence_access or EvidenceAccess(vault)
+        self.file_service = file_service
 
     async def import_file(
         self, filename: str, content: bytes, *, source_id: UUID | None = None
@@ -93,17 +99,23 @@ class SourceService:
         digest = hashlib.sha256(content).hexdigest()
 
         async def persist(document_id: UUID, revision_id: UUID) -> str:
-            return await asyncio.to_thread(
+            return await _thread_call_drained(
                 self.vault.write_source, document_id, revision_id, filename, content
             )
 
-        return await self.repository.register_source(
-            filename=filename,
-            sha256=digest,
-            media_type=SUPPORTED_MEDIA_TYPES[suffix],
-            persist=persist,
-            source_id=source_id,
-        )
+        async def register() -> ImportResult:
+            return await self.repository.register_source(
+                filename=filename,
+                sha256=digest,
+                media_type=SUPPORTED_MEDIA_TYPES[suffix],
+                persist=persist,
+                source_id=source_id,
+            )
+
+        if self.file_service is not None:
+            async with self.file_service.file_lock:
+                return await register()
+        return await register()
 
     async def soft_delete_source(
         self,
@@ -125,6 +137,12 @@ class SourceService:
         expected_lifecycle_version: int,
         expected_latest_revision_id: UUID | None,
     ) -> dict:
+        if self.file_service is not None:
+            return await self.file_service.restore_source(
+                source_id,
+                expected_lifecycle_version=expected_lifecycle_version,
+                expected_latest_revision_id=expected_latest_revision_id,
+            )
         # Capture the pointers and matching revision metadata before reading files.
         # The repository compares the current pointer again under its transaction lock.
         snapshot = await self.repository.get_source(source_id)
@@ -151,7 +169,8 @@ class SourceService:
             digest = revision.get("sha256")
             try:
                 await _thread_call_drained(
-                    self.evidence_access.original_revision, path, digest
+                    self.evidence_access.original_revision, path, digest,
+                    allow_archived=False,
                 )
             except EvidenceFileError as exc:
                 if exc.code in {"missing", "conflict"}:
