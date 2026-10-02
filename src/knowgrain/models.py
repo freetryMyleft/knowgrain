@@ -130,9 +130,66 @@ class Job(Base):
     )
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    force_rebuild: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    cleanup_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB)
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(String(4000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CoreMaintenanceJob(Base):
+    """Durable cleanup request for one deleted source revision lifecycle."""
+
+    __tablename__ = "core_maintenance_job"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["revision_id", "source_id"],
+            ["source_revision.id", "source_revision.source_id"],
+            name="fk_core_maintenance_revision_source",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "revision_id", "lifecycle_version", name="uq_core_maintenance_revision_lifecycle"
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            name="ck_core_maintenance_state",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_core_maintenance_attempts_nonnegative"),
+        CheckConstraint(
+            "lifecycle_version >= 0", name="ck_core_maintenance_lifecycle_nonnegative"
+        ),
+        Index(
+            "ix_core_maintenance_state_lease_created", "state", "lease_until", "created_at"
+        ),
+        Index(
+            "ix_core_maintenance_source_lifecycle_created",
+            "source_id",
+            "lifecycle_version",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    revision_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    lifecycle_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="queued", server_default="queued"
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(4000))
+    cleanup_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

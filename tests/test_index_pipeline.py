@@ -15,6 +15,10 @@ class RepositoryStub:
     def __init__(self):
         self.failure = None
         self.completion = None
+        self.completion_result = True
+        self.cleanup_chunks = None
+        self.cleanup_record_result = True
+        self.renew_result = True
 
     async def fail_job(self, job_id, owner, error):
         self.failure = error
@@ -22,7 +26,14 @@ class RepositoryStub:
 
     async def complete_job(self, job_id, owner, text_sha256, segments):
         self.completion = {"text_sha256": text_sha256, "segments": segments}
-        return True
+        return self.completion_result
+
+    async def record_index_cleanup_chunks(self, job_id, owner, chunk_ids):
+        self.cleanup_chunks = tuple(chunk_ids)
+        return self.cleanup_record_result
+
+    async def renew_lease(self, job_id, owner):
+        return self.renew_result
 
 
 class ModelStub:
@@ -32,8 +43,18 @@ class ModelStub:
         self.calls = []
         self.started = asyncio.Event()
         self.cancelled = False
+        self.events = []
+        self.deletions = []
+        self.delete_result = None
+        self.delete_manifest = ("chunk-1",)
+        self.wait_during_delete = False
+        self.delete_started = asyncio.Event()
+        self.delete_release = asyncio.Event()
+        self.delete_finished = asyncio.Event()
 
     async def index_text(self, **kwargs):
+        await kwargs["before_insert"]()
+        self.events.append("insert")
         self.calls.append(kwargs)
         self.started.set()
         if self.failure:
@@ -44,6 +65,16 @@ class ModelStub:
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
+
+    async def delete_revision(self, **kwargs):
+        self.events.append("delete")
+        self.deletions.append(kwargs)
+        self.delete_started.set()
+        await kwargs["persist_manifest"](self.delete_manifest)
+        if self.wait_during_delete:
+            await self.delete_release.wait()
+        self.delete_finished.set()
+        return self.delete_result
 
 
 class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -90,6 +121,30 @@ class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.runner(model)._execute(job)
         self.assertIn("哈希", self.repository.failure)
         self.assertFalse(model.calls)
+
+    async def test_revoked_lease_blocks_insert_after_forced_cleanup(self):
+        job = self.job(b"evidence")
+        job["force_rebuild"] = True
+        model = ModelStub()
+        original_delete = model.delete_revision
+
+        async def cleanup_then_delete_source(**kwargs):
+            await original_delete(**kwargs)
+            self.repository.renew_result = False
+
+        model.delete_revision = cleanup_then_delete_source
+        await self.runner(model)._execute(job)
+        self.assertEqual(model.events, ["delete"])
+        self.assertFalse(model.calls)
+        self.assertIsNone(self.repository.completion)
+
+    async def test_revoked_lease_blocks_ordinary_insert(self):
+        job = self.job(b"evidence")
+        self.repository.renew_result = False
+        model = ModelStub()
+        await self.runner(model)._execute(job)
+        self.assertFalse(model.calls)
+        self.assertIsNone(self.repository.completion)
 
     async def test_completion_records_text_hash_and_revision_identity(self):
         job = self.job(b"# Heading\n\nEvidence text")
@@ -171,3 +226,87 @@ class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.runner(model)._execute(job)
         self.assertFalse(model.calls)
         self.assertIn("安全读取", self.repository.failure)
+
+    async def test_force_rebuild_cleans_then_reinserts_without_changing_original(self):
+        original = b"# Rebuild\n\nEvidence stays in the Vault."
+        job = self.job(original)
+        job.update(force_rebuild=True, cleanup_chunk_ids=["old-chunk"])
+        model = ModelStub()
+
+        await self.runner(model)._execute(job)
+
+        self.assertEqual(model.events, ["delete", "insert"])
+        self.assertEqual(model.calls[0]["source_id"], job["revision_id"])
+        self.assertEqual(model.deletions[0]["expected_chunk_ids"], ["old-chunk"])
+        self.assertIs(model.deletions[0]["delete_llm_cache"], True)
+        self.assertEqual(self.repository.cleanup_chunks, model.delete_manifest)
+        self.assertEqual(self.vault.read_bytes(job["vault_path"]), original)
+        self.assertIsNotNone(self.repository.completion)
+        self.assertIsNone(self.repository.failure)
+
+    async def test_force_rebuild_requires_manifest_ack_before_delete_and_insert(self):
+        job = self.job(b"evidence")
+        job["force_rebuild"] = True
+        self.repository.cleanup_record_result = False
+        model = ModelStub()
+
+        await self.runner(model)._execute(job)
+
+        self.assertEqual(model.events, ["delete"])
+        self.assertFalse(model.calls)
+        self.assertIsNone(self.repository.completion)
+        self.assertIsNone(self.repository.failure)
+
+    async def test_force_rebuild_rejects_unexpected_cleanup_result(self):
+        job = self.job(b"evidence")
+        job["force_rebuild"] = True
+        model = ModelStub()
+        model.delete_result = True
+
+        await self.runner(model)._execute(job)
+
+        self.assertEqual(model.events, ["delete"])
+        self.assertFalse(model.calls)
+        self.assertIn("RuntimeError", self.repository.failure)
+        self.assertIsNone(self.repository.completion)
+
+    async def test_force_rebuild_flag_requires_a_real_boolean(self):
+        job = self.job(b"evidence")
+        job["force_rebuild"] = 1
+        model = ModelStub()
+
+        await self.runner(model)._execute(job)
+
+        self.assertFalse(model.events)
+        self.assertFalse(model.calls)
+        self.assertIn("ValueError", self.repository.failure)
+
+    async def test_shutdown_drains_force_cleanup_before_returning(self):
+        job = self.job(b"evidence")
+        job["force_rebuild"] = True
+        model = ModelStub()
+        model.wait_during_delete = True
+        task = asyncio.create_task(self.runner(model)._execute(job))
+        await model.delete_started.wait()
+
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        self.assertFalse(model.delete_finished.is_set())
+        self.assertFalse(model.calls)
+
+        model.delete_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertTrue(model.delete_finished.is_set())
+        self.assertFalse(model.calls)
+        self.assertIsNone(self.repository.completion)
+
+    async def test_index_completion_ack_requires_exact_true(self):
+        job = self.job(b"evidence")
+        self.repository.completion_result = 1
+        runner = self.runner(ModelStub())
+
+        with self.assertRaises(JobLeaseLostError):
+            await runner._index(job)

@@ -102,9 +102,11 @@ class IndexJobRunner:
                 logger.warning("Job failure could not be recorded (%s)", type(record_error).__name__)
         finally:
             processing.cancel()
+            cancelled_during_drain = await self._join_task(processing)
             lease.cancel()
-            # Await both before LightRAG can be finalized by application shutdown.
-            await asyncio.gather(processing, lease, return_exceptions=True)
+            cancelled_during_drain |= await self._join_task(lease)
+            if cancelled_during_drain:
+                raise asyncio.CancelledError
 
     async def _renew(self, job_id: UUID) -> None:
         while True:
@@ -120,17 +122,96 @@ class IndexJobRunner:
         except EvidenceFileError:
             raise SourceChangedError("Vault 原件缺失、无法安全读取或与修订哈希不一致；请检查原件后重试") from None
         parsed = await self._thread_drained(parse_document, job["filename"], content)
-        await self.lightrag.index_text(
-            source_id=str(job["revision_id"]), text=parsed.text, file_path=job["vault_path"]
-        )
+        force_rebuild = job.get("force_rebuild", False)
+        if not isinstance(force_rebuild, bool):
+            raise ValueError("索引任务重建标记无效")
+
+        job_id = UUID(str(job["job_id"]))
+        async def before_insert() -> None:
+            if await self.repository.renew_lease(job_id, self.owner) is not True:
+                raise JobLeaseLostError("Job lease was lost before insertion")
+
+        if force_rebuild:
+            async def persist_manifest(chunk_ids: tuple[str, ...]) -> None:
+                recorded = await self.repository.record_index_cleanup_chunks(
+                    job_id, self.owner, chunk_ids
+                )
+                if recorded is not True:
+                    raise JobLeaseLostError("Job lease was lost")
+                renewed = await self.repository.renew_lease(job_id, self.owner)
+                if renewed is not True:
+                    raise JobLeaseLostError("Job lease was lost")
+
+            cleanup_result = await self._core_call_drained(
+                self.lightrag.delete_revision,
+                source_id=str(job["revision_id"]),
+                expected_chunk_ids=job.get("cleanup_chunk_ids"),
+                persist_manifest=persist_manifest,
+                delete_llm_cache=True,
+            )
+            if cleanup_result is not None:
+                raise RuntimeError("LightRAG cleanup returned an invalid result")
+
+            # A forced rebuild is a single cleanup-then-insert operation. Keep the
+            # Core call attached to this job until it has stopped during shutdown.
+            await self._core_call_drained(
+                self.lightrag.index_text,
+                source_id=str(job["revision_id"]),
+                text=parsed.text,
+                file_path=job["vault_path"],
+                before_insert=before_insert,
+            )
+        else:
+            await self.lightrag.index_text(
+                source_id=str(job["revision_id"]),
+                text=parsed.text,
+                file_path=job["vault_path"],
+                before_insert=before_insert,
+            )
         completed = await self.repository.complete_job(
-            UUID(str(job["job_id"])),
+            job_id,
             self.owner,
             hashlib.sha256(parsed.text.encode("utf-8")).hexdigest(),
             [asdict(segment) for segment in parsed.segments],
         )
-        if not completed:
+        if completed is not True:
             raise JobLeaseLostError("Job lease was lost before completion")
+
+    @staticmethod
+    async def _core_call_drained(function, **kwargs):
+        """Keep a forced rebuild's Core operation attached until completion."""
+        task = asyncio.create_task(function(**kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                if not task.done():
+                    continue
+                with suppress(BaseException):
+                    task.result()
+                raise
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+            else:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result
+
+    @staticmethod
+    async def _join_task(task: asyncio.Task) -> bool:
+        """Join a child despite repeated cancellation; return whether it arrived."""
+        joined = asyncio.gather(task, return_exceptions=True)
+        cancelled = False
+        while not joined.done():
+            try:
+                await asyncio.shield(joined)
+            except asyncio.CancelledError:
+                cancelled = True
+        return cancelled
 
     @staticmethod
     async def _thread_drained(function, *args):

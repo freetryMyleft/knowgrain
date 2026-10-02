@@ -35,3 +35,7 @@
   .source-lifecycle-panel { padding: 15px; }
   .source-lifecycle-heading { align-items: flex-start; }
 }
+.core-maintenance-panel h3 { margin: 0 0 10px; font-size: 14px; }
+.core-maintenance-jobs { list-style: none; padding: 0; margin: 14px 0; }
+.core-maintenance-jobs li { padding: 10px 0; border-top: 1px solid #e5e7eb; }
+.core-maintenance-jobs small { display: block; margin-top: 4px; color: #6d7280; font-size: 11px; }

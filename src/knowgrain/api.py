@@ -15,6 +15,8 @@ from starlette.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from knowgrain.config import Settings
+from knowgrain.core_maintenance_api import install_core_maintenance_routes
+from knowgrain.core_maintenance_runner import CoreMaintenanceRunner
 from knowgrain.generation_api import install_generation_routes
 from knowgrain.generation_repository import GenerationRepository
 from knowgrain.generation_service import GenerationService
@@ -116,6 +118,7 @@ class ApplicationRuntime:
     vault_setup: VaultSetupService = field(init=False)
     sources: SourceService = field(init=False)
     jobs: IndexJobRunner = field(init=False)
+    maintenance: CoreMaintenanceRunner = field(init=False)
     wiki_repository: WikiRepository = field(init=False)
     wiki: WikiService = field(init=False)
     generation_repository: GenerationRepository = field(init=False)
@@ -139,6 +142,7 @@ class ApplicationRuntime:
         self.vault_setup = VaultSetupService(self.settings, self.database)
         self.sources = SourceService(self.settings, self.repository, self.vault)
         self.jobs = IndexJobRunner(self.database, self.repository, self.vault, self.lightrag)
+        self.maintenance = CoreMaintenanceRunner(self.database, self.repository, self.lightrag)
         self.wiki_repository = WikiRepository(self.database)
         self.wiki = WikiService(self.vault, self.wiki_repository)
         self.generation_repository = GenerationRepository(self.database)
@@ -165,6 +169,7 @@ class ApplicationRuntime:
             # runner before setup touches files or installs new service references.
             await self.queries.stop()
             await self.generation.stop()
+            await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
             try:
@@ -184,6 +189,7 @@ class ApplicationRuntime:
                 self.vault_ready = True
                 self.vault_error = None
                 self.jobs.start()
+                self.maintenance.start()
                 await self._start_wiki()
                 self.generation.start()
                 await self.queries.start()
@@ -276,6 +282,7 @@ class ApplicationRuntime:
             self.vault_error = "Vault selection is being applied."
             await self.queries.stop()
             await self.generation.stop()
+            await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
             try:
@@ -296,6 +303,7 @@ class ApplicationRuntime:
             self.vault_ready = True
             self.vault_error = None
             self.jobs.start()
+            self.maintenance.start()
             await self._start_wiki()
             self.generation.start()
             await self.queries.start()
@@ -320,6 +328,7 @@ class ApplicationRuntime:
         try:
             await self.queries.stop()
             await self.generation.stop()
+            await self.maintenance.stop()
             await self.jobs.stop()
             await self.wiki.stop()
         finally:
@@ -402,6 +411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_query_routes(app)
     install_entity_mapping_routes(app)
     install_source_lifecycle_routes(app)
+    install_core_maintenance_routes(app)
 
     @app.middleware("http")
     async def validate_write_origin(request: Request, call_next):

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import VaultSettings from './VaultSettings'
 import SourceLifecyclePanel from './SourceLifecyclePanel'
+import CoreMaintenancePanel from './CoreMaintenancePanel'
 const WikiWorkspace = lazy(() => import('./WikiWorkspace'))
 const QuestionsWorkspace = lazy(() => import('./QuestionsWorkspace'))
 
@@ -245,7 +246,11 @@ export default function App() {
   const [sourceState, setSourceState] = useState<'active' | 'deleted'>('active')
   const [uploading, setUploading] = useState(false)
   const [retrying, setRetrying] = useState(false)
-  const [lifecycleBusy, setLifecycleBusy] = useState(false)
+  const [sourceLifecycleBusy, setLifecycleBusy] = useState(false)
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false)
+  const lifecycleBusy = sourceLifecycleBusy || maintenanceBusy
+  const sourceBusyRef = useRef(false)
+  const maintenanceBusyRef = useRef(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [activeJob, setActiveJob] = useState<JobSnapshot | null>(null)
   const [notice, setNotice] = useState<{ tone: 'positive' | 'negative'; text: string } | null>(null)
@@ -312,10 +317,21 @@ export default function App() {
   }, [])
 
   const lifecycleBusyChanged = useCallback((busy: boolean) => {
-    lifecycleBusyRef.current = busy
+    sourceBusyRef.current = busy
+    lifecycleBusyRef.current = busy || maintenanceBusyRef.current
     if (busy) detailRequestRef.current += 1
     setLifecycleBusy(busy)
     if (!busy && selectedIdRef.current) {
+      void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
+    }
+  }, [refreshDetail])
+
+  const maintenanceBusyChanged = useCallback((busy: boolean) => {
+    maintenanceBusyRef.current = busy
+    lifecycleBusyRef.current = busy || sourceBusyRef.current
+    if (busy) detailRequestRef.current += 1
+    setMaintenanceBusy(busy)
+    if (!lifecycleBusyRef.current && selectedIdRef.current) {
       void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
     }
   }, [refreshDetail])
@@ -733,9 +749,12 @@ export default function App() {
                 <Icon name="retry" size={15} />{retrying ? '正在排队…' : '重试索引'}
               </button>}
             </div>
-            <SourceLifecyclePanel source={selected} disabled={!canUpload || uploading || retrying || detailLoading || Boolean(detailError)} onBusyChange={lifecycleBusyChanged} onChanged={lifecycleChanged} onConflict={() => {
+            <SourceLifecyclePanel source={selected} disabled={!canUpload || uploading || retrying || maintenanceBusy || detailLoading || Boolean(detailError)} onBusyChange={lifecycleBusyChanged} onChanged={lifecycleChanged} onConflict={() => {
               if (selectedIdRef.current) void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
               void refreshList(undefined, false)
+            }} />
+            <CoreMaintenancePanel sourceId={selected.source_id} state={selected.state} lifecycleVersion={selected.lifecycle_version} disabled={!canUpload || uploading || retrying || lifecycleBusy} onBusyChange={maintenanceBusyChanged} onSourceChanged={() => {
+              if (selectedIdRef.current) void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
             }} />
             {detailError && <p className="detail-refresh-error" role="status">详情刷新失败：{detailError}</p>}
             <div className="inspector-section-heading"><span>修订状态</span><span className="revision-counter">{selected.latest_revision_id ? '最近上传与当前索引' : '等待导入'}</span></div>

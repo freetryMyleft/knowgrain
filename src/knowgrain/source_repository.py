@@ -2,23 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Awaitable, Callable
+from datetime import datetime, timedelta
+from typing import Awaitable, Callable, Sequence
 
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from knowgrain.database import ApplicationDatabase
-from knowgrain.models import Job, SourceDocument, SourceRevision
+from knowgrain.models import CoreMaintenanceJob, Job, SourceDocument, SourceRevision
 
 
 PersistSource = Callable[[uuid.UUID, uuid.UUID], Awaitable[str]]
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _LEASE_DURATION = timedelta(seconds=90)
 _MAX_ERROR_LENGTH = 4000
+_MAX_CLEANUP_CHUNKS = 10_000
+_MAINTENANCE_CLEANED_ERROR = "已清理索引，恢复后将重建"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +208,7 @@ class SourceRepository:
                     )
                 ).all()
             )
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
             revisions = list(
                 (
                     await session.scalars(
@@ -223,12 +227,34 @@ class SourceRepository:
                     job.lease_until = None
                     job.error = "Source deleted"
                     job.updated_at = now
+            lifecycle_version = source.lifecycle_version + 1
+            existing_revision_ids = {
+                maintenance.revision_id
+                for maintenance in maintenance_jobs
+                if maintenance.lifecycle_version == lifecycle_version
+            }
             for revision in revisions:
+                if revision.id not in existing_revision_ids:
+                    session.add(
+                        CoreMaintenanceJob(
+                            id=uuid.uuid4(),
+                            source_id=source.id,
+                            revision_id=revision.id,
+                            lifecycle_version=lifecycle_version,
+                            state="queued",
+                            cleanup_chunk_ids=self._merge_cleanup_manifests(
+                                revision.id, jobs, maintenance_jobs
+                            ),
+                            attempts=0,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
                 if revision.index_state in {"queued", "indexing"}:
                     revision.index_state = "failed"
                     revision.error = "Source deleted"
             source.state = "deleted"
-            source.lifecycle_version += 1
+            source.lifecycle_version = lifecycle_version
             await session.flush()
             return await self._source_snapshot(session, source)
 
@@ -254,7 +280,10 @@ class SourceRepository:
                 source.state == "active"
                 and source.lifecycle_version == expected_lifecycle_version + 1
                 and source.latest_revision_id == expected_latest_revision_id
-                and source.current_revision_id == verified_current_revision_id
+                and (
+                    source.current_revision_id == verified_current_revision_id
+                    or source.current_revision_id is None
+                )
             ):
                 return await self._source_snapshot(session, source)
             if (
@@ -264,6 +293,62 @@ class SourceRepository:
                 or source.current_revision_id != verified_current_revision_id
             ):
                 raise SourceConflictError("Source changed; refresh before restoring")
+
+            index_jobs = await self._lock_source_index_jobs(session, source.id)
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+            if any(job.state == "running" for job in maintenance_jobs):
+                raise SourceConflictError("Core cleanup is still running; retry restore later")
+
+            now = await self._database_now(session)
+            attempted_cleanup = any(
+                job.lifecycle_version == source.lifecycle_version and job.attempts > 0
+                for job in maintenance_jobs
+            )
+            for maintenance in maintenance_jobs:
+                if maintenance.lifecycle_version != source.lifecycle_version:
+                    continue
+                if maintenance.state == "queued" or (
+                    maintenance.state == "failed" and maintenance.attempts == 0
+                ):
+                    maintenance.state = "cancelled"
+                    maintenance.lease_owner = None
+                    maintenance.lease_until = None
+                    maintenance.error = None
+                    maintenance.updated_at = now
+
+            if attempted_cleanup and source.latest_revision_id is not None:
+                latest_job = next(
+                    (
+                        job
+                        for job in index_jobs
+                        if job.revision_id == source.latest_revision_id
+                    ),
+                    None,
+                )
+                latest_revision = next(
+                    (
+                        revision
+                        for revision in revisions
+                        if revision.id == source.latest_revision_id
+                    ),
+                    None,
+                )
+                if latest_job is None or latest_revision is None:
+                    raise SourceConflictError("Latest revision indexing record is missing")
+                latest_job.state = "queued"
+                latest_job.force_rebuild = True
+                latest_job.cleanup_chunk_ids = self._merge_cleanup_manifests(
+                    latest_revision.id, index_jobs, maintenance_jobs
+                )
+                latest_job.lease_owner = None
+                latest_job.lease_until = None
+                latest_job.error = None
+                latest_job.updated_at = now
+                latest_revision.index_state = "queued"
+                latest_revision.error = None
+                source.current_revision_id = None
+
             source.state = "active"
             source.lifecycle_version += 1
             await session.flush()
@@ -309,12 +394,9 @@ class SourceRepository:
             job = await self._job_for_revision(session, source.latest_revision_id, lock=True)
             if job.state in {"queued", "running"}:
                 raise SourceConflictError("The latest revision is already queued or indexing")
-            now = datetime.now(UTC)
-            job.state = "queued"
-            job.lease_owner = None
-            job.lease_until = None
-            job.error = None
-            job.updated_at = now
+            maintenance_jobs = await self._lock_revision_maintenance_jobs(
+                session, source.latest_revision_id
+            )
             revision = await session.scalar(
                 select(SourceRevision)
                 .where(SourceRevision.id == source.latest_revision_id)
@@ -322,6 +404,16 @@ class SourceRepository:
             )
             if revision is None:
                 raise SourceConflictError("Latest revision record is missing")
+            now = await self._database_now(session)
+            job.state = "queued"
+            job.lease_owner = None
+            job.lease_until = None
+            job.error = None
+            job.force_rebuild = True
+            job.cleanup_chunk_ids = self._merge_cleanup_manifests(
+                revision.id, [job], maintenance_jobs
+            )
+            job.updated_at = now
             revision.index_state = "queued"
             revision.error = None
             return job.id
@@ -355,6 +447,7 @@ class SourceRepository:
             )
             if job is None:
                 return None
+            await self._lock_revision_maintenance_jobs(session, job.revision_id)
             revision = await session.scalar(
                 select(SourceRevision)
                 .where(SourceRevision.id == job.revision_id)
@@ -381,7 +474,263 @@ class SourceRepository:
                 "filename": revision.filename,
                 "vault_path": revision.vault_path,
                 "sha256": revision.sha256,
+                "force_rebuild": job.force_rebuild,
+                "cleanup_chunk_ids": list(job.cleanup_chunk_ids)
+                if job.cleanup_chunk_ids is not None
+                else None,
             }
+
+    async def record_index_cleanup_chunks(
+        self,
+        job_id: uuid.UUID,
+        owner: uuid.UUID,
+        chunk_ids: Sequence[str],
+    ) -> bool:
+        manifest = self._normalize_cleanup_chunks(chunk_ids)
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_job_context(session, job_id)
+            if context is None:
+                return False
+            source, job, _revision = context
+            now = await self._database_now(session)
+            if not self._has_live_lease(source, job, owner, now) or not job.force_rebuild:
+                return False
+            job.cleanup_chunk_ids = list(manifest)
+            job.updated_at = now
+            return True
+
+    async def claim_maintenance(self, owner: uuid.UUID) -> dict | None:
+        async with self.database.session_factory() as session, session.begin():
+            statement = (
+                select(SourceDocument, SourceRevision.id, CoreMaintenanceJob.id, Job.id)
+                .join(SourceRevision, SourceRevision.source_id == SourceDocument.id)
+                .join(Job, Job.revision_id == SourceRevision.id)
+                .join(
+                    CoreMaintenanceJob,
+                    and_(
+                        CoreMaintenanceJob.revision_id == SourceRevision.id,
+                        CoreMaintenanceJob.source_id == SourceDocument.id,
+                    ),
+                )
+                .where(
+                    SourceDocument.state == "deleted",
+                    CoreMaintenanceJob.lifecycle_version == SourceDocument.lifecycle_version,
+                    or_(
+                        CoreMaintenanceJob.state == "queued",
+                        and_(
+                            CoreMaintenanceJob.state == "running",
+                            or_(
+                                CoreMaintenanceJob.lease_until.is_(None),
+                                CoreMaintenanceJob.lease_until <= func.clock_timestamp(),
+                            ),
+                        ),
+                    ),
+                )
+                .order_by(CoreMaintenanceJob.created_at, CoreMaintenanceJob.id)
+                .with_for_update(of=SourceDocument, skip_locked=True)
+                .limit(1)
+            )
+            candidate = (await session.execute(statement)).first()
+            if candidate is None:
+                return None
+            source, revision_id, maintenance_id, index_job_id = candidate
+            index_job = await session.scalar(
+                select(Job)
+                .where(Job.id == index_job_id)
+                .with_for_update(skip_locked=True)
+            )
+            if index_job is None:
+                return None
+            maintenance = await session.scalar(
+                select(CoreMaintenanceJob)
+                .where(CoreMaintenanceJob.id == maintenance_id)
+                .with_for_update(skip_locked=True)
+            )
+            if maintenance is None:
+                return None
+            revision = await session.scalar(
+                select(SourceRevision)
+                .where(SourceRevision.id == revision_id)
+                .with_for_update()
+            )
+            if revision is None:
+                raise SourceConflictError("Maintenance job references a missing revision")
+            now = await self._database_now(session)
+            if (
+                source.state != "deleted"
+                or maintenance.lifecycle_version != source.lifecycle_version
+                or not self._is_claimable(maintenance, now)
+            ):
+                return None
+            if revision.source_id != source.id or index_job.revision_id != revision.id:
+                raise SourceConflictError("Maintenance job revision changed source unexpectedly")
+            maintenance.state = "running"
+            maintenance.lease_owner = owner
+            maintenance.lease_until = now + _LEASE_DURATION
+            maintenance.attempts += 1
+            maintenance.error = None
+            maintenance.updated_at = now
+            await session.flush()
+            return {
+                "job_id": str(maintenance.id),
+                "source_id": str(source.id),
+                "revision_id": str(revision.id),
+                "lifecycle_version": maintenance.lifecycle_version,
+                "cleanup_chunk_ids": list(maintenance.cleanup_chunk_ids)
+                if maintenance.cleanup_chunk_ids is not None
+                else None,
+            }
+
+    async def renew_maintenance_lease(self, job_id: uuid.UUID, owner: uuid.UUID) -> bool:
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_maintenance_context(session, job_id)
+            if context is None:
+                return False
+            source, maintenance, _revision = context
+            now = await self._database_now(session)
+            if not self._has_live_maintenance_lease(source, maintenance, owner, now):
+                return False
+            maintenance.lease_until = now + _LEASE_DURATION
+            maintenance.updated_at = now
+            return True
+
+    async def record_maintenance_chunks(
+        self,
+        job_id: uuid.UUID,
+        owner: uuid.UUID,
+        chunk_ids: Sequence[str],
+    ) -> bool:
+        manifest = self._normalize_cleanup_chunks(chunk_ids)
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_maintenance_context(session, job_id)
+            if context is None:
+                return False
+            source, maintenance, _revision = context
+            now = await self._database_now(session)
+            if not self._has_live_maintenance_lease(source, maintenance, owner, now):
+                return False
+            maintenance.cleanup_chunk_ids = list(manifest)
+            maintenance.updated_at = now
+            return True
+
+    async def complete_maintenance(self, job_id: uuid.UUID, owner: uuid.UUID) -> bool:
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_maintenance_context(session, job_id)
+            if context is None:
+                return False
+            source, maintenance, revision = context
+            now = await self._database_now(session)
+            if not self._has_live_maintenance_lease(source, maintenance, owner, now):
+                return False
+            maintenance.state = "succeeded"
+            maintenance.lease_owner = None
+            maintenance.lease_until = None
+            maintenance.error = None
+            maintenance.updated_at = now
+            revision.index_state = "failed"
+            revision.error = _MAINTENANCE_CLEANED_ERROR
+            return True
+
+    async def fail_maintenance(
+        self, job_id: uuid.UUID, owner: uuid.UUID, safe_error: str
+    ) -> bool:
+        bounded_error = (safe_error or "Core cleanup failed")[:_MAX_ERROR_LENGTH]
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_maintenance_context(session, job_id)
+            if context is None:
+                return False
+            source, maintenance, _revision = context
+            now = await self._database_now(session)
+            if not self._has_live_maintenance_lease(source, maintenance, owner, now):
+                return False
+            maintenance.state = "failed"
+            maintenance.lease_owner = None
+            maintenance.lease_until = None
+            maintenance.error = bounded_error
+            maintenance.updated_at = now
+            return True
+
+    async def release_maintenance_owner(self, owner: uuid.UUID) -> None:
+        async with self.database.session_factory() as session, session.begin():
+            source_ids = list(
+                (
+                    await session.scalars(
+                        select(SourceDocument.id)
+                        .join(
+                            CoreMaintenanceJob,
+                            CoreMaintenanceJob.source_id == SourceDocument.id,
+                        )
+                        .where(
+                            CoreMaintenanceJob.state == "running",
+                            CoreMaintenanceJob.lease_owner == owner,
+                        )
+                        .distinct()
+                        .order_by(SourceDocument.id)
+                    )
+                ).all()
+            )
+            for source_id in source_ids:
+                source = await session.scalar(
+                    select(SourceDocument)
+                    .where(SourceDocument.id == source_id)
+                    .with_for_update()
+                )
+                if source is None:
+                    continue
+                await self._lock_source_index_jobs(session, source.id)
+                maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+                await self._lock_source_revisions(session, source.id)
+                now = await self._database_now(session)
+                for maintenance in maintenance_jobs:
+                    if maintenance.state != "running" or maintenance.lease_owner != owner:
+                        continue
+                    current_cycle = (
+                        source.state == "deleted"
+                        and source.lifecycle_version == maintenance.lifecycle_version
+                    )
+                    maintenance.state = "failed" if current_cycle else "cancelled"
+                    maintenance.lease_owner = None
+                    maintenance.lease_until = None
+                    maintenance.error = (
+                        "Core cleanup stopped before completion" if current_cycle else None
+                    )
+                    maintenance.updated_at = now
+
+    async def retry_maintenance(self, job_id: uuid.UUID) -> dict:
+        async with self.database.session_factory() as session, session.begin():
+            context = await self._lock_maintenance_context(session, job_id)
+            if context is None:
+                raise SourceNotFoundError(f"Maintenance job {job_id} does not exist")
+            source, maintenance, _revision = context
+            if (
+                source.state != "deleted"
+                or source.lifecycle_version != maintenance.lifecycle_version
+            ):
+                raise SourceConflictError("Maintenance job is not for the current deleted cycle")
+            if maintenance.state in {"running", "succeeded", "cancelled"}:
+                raise SourceConflictError("Maintenance job cannot be retried in its current state")
+            now = await self._database_now(session)
+            if maintenance.state == "failed":
+                maintenance.state = "queued"
+                maintenance.lease_owner = None
+                maintenance.lease_until = None
+                maintenance.error = None
+                maintenance.updated_at = now
+            return self._maintenance_snapshot(maintenance)
+
+    async def list_maintenance(
+        self, source_id: uuid.UUID, *, limit: int = 100
+    ) -> list[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        async with self.database.session_factory() as session:
+            rows = await session.scalars(
+                select(CoreMaintenanceJob)
+                .where(CoreMaintenanceJob.source_id == source_id)
+                .order_by(CoreMaintenanceJob.created_at.desc(), CoreMaintenanceJob.id)
+                .limit(limit)
+            )
+            return [self._maintenance_snapshot(job) for job in rows]
 
     async def renew_lease(self, job_id: uuid.UUID, owner: uuid.UUID) -> bool:
         async with self.database.session_factory() as session, session.begin():
@@ -429,6 +778,7 @@ class SourceRepository:
             job.lease_owner = None
             job.lease_until = None
             job.error = None
+            job.force_rebuild = False
             job.updated_at = now
             if source.state == "active" and source.latest_revision_id == revision.id:
                 source.current_revision_id = revision.id
@@ -490,6 +840,7 @@ class SourceRepository:
                         )
                     ).all()
                 )
+                await self._lock_source_maintenance_jobs(session, source.id)
                 revisions = list(
                     (
                         await session.scalars(
@@ -513,6 +864,145 @@ class SourceRepository:
                     if revision is not None and revision.index_state == "indexing":
                         revision.index_state = "failed" if deleted else "queued"
                         revision.error = "Source deleted" if deleted else None
+
+    async def _lock_source_index_jobs(
+        self, session: AsyncSession, source_id: uuid.UUID
+    ) -> list[Job]:
+        return list(
+            (
+                await session.scalars(
+                    select(Job)
+                    .join(SourceRevision, SourceRevision.id == Job.revision_id)
+                    .where(SourceRevision.source_id == source_id)
+                    .order_by(Job.id)
+                    .with_for_update(of=Job)
+                )
+            ).all()
+        )
+
+    async def _lock_source_maintenance_jobs(
+        self, session: AsyncSession, source_id: uuid.UUID
+    ) -> list[CoreMaintenanceJob]:
+        return list(
+            (
+                await session.scalars(
+                    select(CoreMaintenanceJob)
+                    .where(CoreMaintenanceJob.source_id == source_id)
+                    .order_by(CoreMaintenanceJob.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
+    async def _lock_revision_maintenance_jobs(
+        self, session: AsyncSession, revision_id: uuid.UUID
+    ) -> list[CoreMaintenanceJob]:
+        return list(
+            (
+                await session.scalars(
+                    select(CoreMaintenanceJob)
+                    .where(CoreMaintenanceJob.revision_id == revision_id)
+                    .order_by(CoreMaintenanceJob.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
+    async def _lock_source_revisions(
+        self, session: AsyncSession, source_id: uuid.UUID
+    ) -> list[SourceRevision]:
+        return list(
+            (
+                await session.scalars(
+                    select(SourceRevision)
+                    .where(SourceRevision.source_id == source_id)
+                    .order_by(SourceRevision.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
+    async def _lock_maintenance_context(
+        self, session: AsyncSession, job_id: uuid.UUID
+    ) -> tuple[SourceDocument, CoreMaintenanceJob, SourceRevision] | None:
+        identity = await session.execute(
+            select(CoreMaintenanceJob.source_id, CoreMaintenanceJob.revision_id)
+            .where(CoreMaintenanceJob.id == job_id)
+        )
+        row = identity.first()
+        if row is None:
+            return None
+        source_id, revision_id = row
+        source = await session.scalar(
+            select(SourceDocument)
+            .where(SourceDocument.id == source_id)
+            .with_for_update()
+        )
+        if source is None:
+            raise SourceConflictError("Maintenance job references a missing source")
+        index_job = await session.scalar(
+            select(Job)
+            .where(Job.revision_id == revision_id, Job.kind == "index")
+            .with_for_update()
+        )
+        if index_job is None:
+            raise SourceConflictError("Maintenance job revision has no index job")
+        maintenance = await session.scalar(
+            select(CoreMaintenanceJob)
+            .where(CoreMaintenanceJob.id == job_id)
+            .with_for_update()
+        )
+        if maintenance is None:
+            return None
+        revision = await session.scalar(
+            select(SourceRevision)
+            .where(SourceRevision.id == revision_id)
+            .with_for_update()
+        )
+        if revision is None:
+            raise SourceConflictError("Maintenance job references a missing revision")
+        if (
+            maintenance.revision_id != revision.id
+            or maintenance.source_id != source.id
+            or revision.source_id != source.id
+            or index_job.revision_id != revision.id
+        ):
+            raise SourceConflictError("Maintenance job revision changed source unexpectedly")
+        return source, maintenance, revision
+
+    @staticmethod
+    def _normalize_cleanup_chunks(chunk_ids: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(chunk_ids, (str, bytes)) or not isinstance(chunk_ids, Sequence):
+            raise ValueError("chunk_ids must be a sequence of text chunk IDs")
+        if len(chunk_ids) > _MAX_CLEANUP_CHUNKS:
+            raise ValueError("cleanup manifest exceeds the 10000 chunk limit")
+        unique: dict[str, None] = {}
+        for chunk_id in chunk_ids:
+            if not isinstance(chunk_id, str) or not 1 <= len(chunk_id) <= 512:
+                raise ValueError("each chunk ID must contain between 1 and 512 characters")
+            if any(unicodedata.category(char) == "Cc" for char in chunk_id):
+                raise ValueError("chunk IDs must not contain control characters")
+            unique.setdefault(chunk_id, None)
+        return tuple(unique)
+
+    @classmethod
+    def _merge_cleanup_manifests(
+        cls, revision_id: uuid.UUID, index_jobs: Sequence[Job],
+        maintenance_jobs: Sequence[CoreMaintenanceJob],
+    ) -> list[str] | None:
+        known: set[str] = set()
+        found = False
+        for job in (*index_jobs, *maintenance_jobs):
+            if job.revision_id != revision_id or job.cleanup_chunk_ids is None:
+                continue
+            found = True
+            try:
+                known.update(cls._normalize_cleanup_chunks(job.cleanup_chunk_ids))
+            except ValueError:
+                raise SourceConflictError("Stored cleanup manifest is invalid") from None
+            if len(known) > _MAX_CLEANUP_CHUNKS:
+                raise SourceConflictError("Stored cleanup manifest exceeds the supported limit")
+        return sorted(known) if found else None
 
     async def _lock_hash(self, session: AsyncSession, sha256: str) -> None:
         lock_key = int.from_bytes(hashlib.sha256(sha256.encode("ascii")).digest()[:8], "big", signed=True)
@@ -542,6 +1032,7 @@ class SourceRepository:
         )
         if job is None:
             return None
+        await self._lock_revision_maintenance_jobs(session, revision_id)
         revision = await session.scalar(
             select(SourceRevision)
             .where(SourceRevision.id == revision_id)
@@ -582,6 +1073,37 @@ class SourceRepository:
             and job.lease_until is not None
             and job.lease_until > now
         )
+
+    @staticmethod
+    def _has_live_maintenance_lease(
+        source: SourceDocument,
+        job: CoreMaintenanceJob,
+        owner: uuid.UUID,
+        now: datetime,
+    ) -> bool:
+        return (
+            source.state == "deleted"
+            and source.lifecycle_version == job.lifecycle_version
+            and job.state == "running"
+            and job.lease_owner == owner
+            and job.lease_until is not None
+            and job.lease_until > now
+        )
+
+    @classmethod
+    def _maintenance_snapshot(cls, job: CoreMaintenanceJob) -> dict:
+        return {
+            "job_id": str(job.id),
+            "source_id": str(job.source_id),
+            "revision_id": str(job.revision_id),
+            "lifecycle_version": job.lifecycle_version,
+            "state": job.state,
+            "attempts": job.attempts,
+            "error": job.error,
+            "created_at": cls._iso(job.created_at),
+            "updated_at": cls._iso(job.updated_at),
+            "lease_until": cls._iso(job.lease_until),
+        }
 
     async def _find_active_hash(
         self, session: AsyncSession, sha256: str

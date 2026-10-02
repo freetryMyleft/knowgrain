@@ -53,6 +53,12 @@ Full objective: M0 through M6 in architecture-and-development-plan.md and the at
 - Verified: 240 backend checks passed with real PostgreSQL selected, 18 frontend contract checks and production build passed. Real Web deletion/restoration moved lifecycle 0 → 1 → 2 and Wiki entity mappings 3 → 0 → 3. An actual new query during deletion returned insufficient/no claims/evidence; history retained exact original access and recalculated freshness. Reviewed Wiki stayed identical. Old version-0 delete after restore returned 409. See [source lifecycle verification](verification/m5-source-lifecycle-2026-10-02.md).
 - Remaining M5: durable Core cleanup, Trash archive/restore, shared relationship member cleanup, forced rebuild/reindex, startup reconciliation and backup/restore drill. This node is logical deletion/restoration, not full M5 acceptance.
 
+## M5 persisted Core maintenance — node accepted locally
+
+- Implemented: migration 0011 with deleted-source backfill, durable cleanup jobs and leases, safe manifest inheritance, public Core deletion with strict absence checks, forced cleanup/reinsert, insertion lease validation under the Core write lock, and Web cleanup status/retry coordination. This accepts the maintenance/reindex node, not all M5.
+- Verified: 283 backend checks, 20 frontend contract checks, TypeScript/production build, both isolated databases' migration/model parity, and specialist/general reviews. Actual two-document Core verification preserved a shared relation's remaining source after deletion and restored both memberships after reindex. See [maintenance verification](verification/m5-core-maintenance-2026-10-02.md).
+- Actual Web deletion cleaned two revisions; restoration queued a real reindex with current=null, then ready/current=latest with unchanged original/reviewed Wiki hashes and current entity evidence. New API process reclaimed a persisted expired maintenance lease (attempts1→2/succeeded). Five maintenance PostgreSQL checks cover Source-lock expiry and cross-source/revision/epoch isolation; a separate populated 0010→0011 migration proved deleted-only backfill. These tests do not claim physical power-loss or exhaustive partial-Core-failure recovery. Trash, full startup reconciliation, backup/rebuild workflow, full graph/automatic Wiki relationships and release scope remain required.
+
 ## Remaining scope
 
 - Next: M5 recovery, reconciliation, deletion and rebuild, followed by M6 evaluation/release. Full dependency/model installation wizard remains M6 work.

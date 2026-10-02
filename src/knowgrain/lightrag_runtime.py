@@ -3,7 +3,7 @@ import hashlib
 from functools import partial
 from pathlib import Path
 import unicodedata
-from typing import Any, Literal, Sequence
+from typing import Any, Awaitable, Callable, Literal, Sequence
 from uuid import UUID
 
 from knowgrain.config import Settings
@@ -19,6 +19,7 @@ _MAX_ENTITY_CHUNKS = 10_000
 _MAX_ENTITY_NAME_LENGTH = 512
 _MAX_ENTITY_TYPE_LENGTH = 256
 _MAX_ENTITY_CHUNK_ID_LENGTH = 512
+_MAX_CLEANUP_CHUNKS = 10_000
 _PARTIAL_STORAGE_ATTRIBUTES = (
     "full_docs",
     "text_chunks",
@@ -43,6 +44,7 @@ class LightRAGRuntime:
         self._rag: Any | None = None
         self._partial_rag: Any | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
         self._model_validation_lock = asyncio.Lock()
         self._model_validation_pending = 0
         self._event_loop: asyncio.AbstractEventLoop | None = None
@@ -331,45 +333,46 @@ class LightRAGRuntime:
     async def close(self) -> None:
         self._bind_event_loop()
         async with self._lifecycle_lock:
-            if self._rag is not None:
-                rag = self._rag
-                try:
-                    # Cancelling the queue caller can leave its provider worker
-                    # running. End and drain these workers before their cache
-                    # storages are finalized.
-                    callbacks = getattr(rag, "role_llm_funcs", {})
-                    seen = set()
-                    for callback in callbacks.values():
-                        if id(callback) in seen:
-                            continue
-                        seen.add(id(callback))
-                        shutdown = getattr(callback, "shutdown", None)
-                        if callable(shutdown):
-                            await shutdown(graceful=False)
-                    await rag.finalize_storages()
-                except BaseException as close_error:
-                    self._restart_required_detail = (
-                        "LightRAG storage finalization failed "
-                        f"({type(close_error).__name__}); restart the Knowgrain process "
-                        "before retrying"
+            async with self._write_lock:
+                if self._rag is not None:
+                    rag = self._rag
+                    try:
+                        # Cancelling the queue caller can leave its provider worker
+                        # running. End and drain these workers before their cache
+                        # storages are finalized.
+                        callbacks = getattr(rag, "role_llm_funcs", {})
+                        seen = set()
+                        for callback in callbacks.values():
+                            if id(callback) in seen:
+                                continue
+                            seen.add(id(callback))
+                            shutdown = getattr(callback, "shutdown", None)
+                            if callable(shutdown):
+                                await shutdown(graceful=False)
+                        await rag.finalize_storages()
+                    except BaseException as close_error:
+                        self._restart_required_detail = (
+                            "LightRAG storage finalization failed "
+                            f"({type(close_error).__name__}); restart the Knowgrain process "
+                            "before retrying"
+                        )
+                        raise
+                    self._rag = None
+                    self._partial_rag = None
+                elif self._partial_rag is not None:
+                    cleanup_failures, cleanup_was_cancelled = await self._finalize_partial_storages(
+                        self._partial_rag
                     )
-                    raise
-                self._rag = None
-                self._partial_rag = None
-            elif self._partial_rag is not None:
-                cleanup_failures, cleanup_was_cancelled = await self._finalize_partial_storages(
-                    self._partial_rag
-                )
-                if cleanup_was_cancelled:
-                    detail = "Could not finalize partial LightRAG storages"
+                    if cleanup_was_cancelled:
+                        detail = "Could not finalize partial LightRAG storages"
+                        if cleanup_failures:
+                            detail += ": " + ", ".join(cleanup_failures)
+                        raise asyncio.CancelledError(detail)
                     if cleanup_failures:
-                        detail += ": " + ", ".join(cleanup_failures)
-                    raise asyncio.CancelledError(detail)
-                if cleanup_failures:
-                    raise RuntimeError(
-                        "Could not finalize partial LightRAG storages: "
-                        + ", ".join(cleanup_failures)
-                    )
+                        raise RuntimeError(
+                            "Could not finalize partial LightRAG storages: "
+                            + ", ".join(cleanup_failures)
+                        )
 
     async def index_text(
         self,
@@ -377,15 +380,198 @@ class LightRAGRuntime:
         source_id: str,
         text: str,
         file_path: str,
+        before_insert: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        rag = self._require_started()
-        await rag.ainsert(text, ids=[source_id], file_paths=[file_path])
-        # ainsert returns a tracking ID even if a pipeline stage records failure.
-        # Application status must follow the persisted document status, not return alone.
-        document = await rag.doc_status.get_by_id_strict(source_id)
-        if not document or document.get("status") != "processed":
-            document_status = document.get("status", "missing") if document else "missing"
-            raise RuntimeError(f"LightRAG document was not processed ({document_status})")
+        async with self._write_lock:
+            rag = self._require_started()
+            if before_insert is not None:
+                await before_insert()
+            await rag.ainsert(text, ids=[source_id], file_paths=[file_path])
+            # ainsert returns a tracking ID even if a pipeline stage records failure.
+            # Application status must follow the persisted document status, not return alone.
+            document = await rag.doc_status.get_by_id_strict(source_id)
+            if not document or document.get("status") != "processed":
+                document_status = document.get("status", "missing") if document else "missing"
+                raise RuntimeError(f"LightRAG document was not processed ({document_status})")
+
+    async def delete_revision(
+        self,
+        *,
+        source_id: str,
+        expected_chunk_ids: Sequence[str] | None = None,
+        persist_manifest: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
+        delete_llm_cache: bool = False,
+    ) -> None:
+        """Delete one revision through LightRAG's public document API.
+
+        The durable manifest callback runs under the same exclusive write lock
+        as indexing and before Core's destructive API. A Core miss only counts
+        as an idempotent success after every owned record is positively absent.
+        """
+        doc_id = self._canonical_revision_id(source_id)
+        previous_chunks = self._normalize_cleanup_chunk_ids(expected_chunk_ids)
+
+        async with self._write_lock:
+            rag = self._require_started()
+            document = await self._strict_get(rag.doc_status, doc_id)
+            status_chunks: tuple[str, ...] = ()
+            if document is not None:
+                if not isinstance(document, dict):
+                    raise RuntimeError("LightRAG document status is malformed")
+                raw_chunks = document.get("chunks_list")
+                if not isinstance(raw_chunks, list):
+                    raise RuntimeError("LightRAG document chunk manifest is malformed")
+                status_chunks = self._normalize_cleanup_chunk_ids(raw_chunks)
+
+            manifest = tuple(sorted(set(previous_chunks).union(status_chunks)))
+            if len(manifest) > _MAX_CLEANUP_CHUNKS:
+                raise RuntimeError("LightRAG document cleanup manifest exceeds the supported limit")
+
+            chunk_records = await self._strict_get_many(rag.text_chunks, manifest)
+            has_owned_orphan_chunks = False
+            for chunk_id, record in zip(manifest, chunk_records, strict=True):
+                if record is None:
+                    continue
+                if not isinstance(record, dict):
+                    raise RuntimeError("LightRAG text chunk record is malformed")
+                if record.get("full_doc_id") != doc_id:
+                    raise RuntimeError("LightRAG cleanup manifest contains a foreign text chunk")
+                has_owned_orphan_chunks = True
+
+            if document is None:
+                for storage_name in ("full_docs", "full_entities", "full_relations"):
+                    record = await self._strict_get(getattr(rag, storage_name, None), doc_id)
+                    if record is not None:
+                        raise RuntimeError(
+                            "LightRAG document status is missing while document data remains"
+                        )
+                if has_owned_orphan_chunks:
+                    raise RuntimeError(
+                        "LightRAG document status is missing while owned text chunks remain"
+                    )
+
+            if persist_manifest is None and (document is not None or manifest):
+                raise RuntimeError(
+                    "LightRAG cleanup manifest persistence is required before deletion"
+                )
+            if persist_manifest is not None:
+                await persist_manifest(manifest)
+
+            try:
+                raw_result = await self._await_core_deletion(
+                    rag.adelete_by_doc_id(doc_id, delete_llm_cache=delete_llm_cache)
+                )
+            except Exception:
+                raise RuntimeError("LightRAG document deletion failed") from None
+            result_status = self._normalize_deletion_result(raw_result, doc_id)
+            if result_status not in {"success", "not_found"}:
+                raise RuntimeError("LightRAG refused or failed to delete the document")
+
+            await self._assert_revision_absent(rag, doc_id, manifest)
+
+    @staticmethod
+    def _canonical_revision_id(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Revision ID must be a canonical UUID")
+        try:
+            parsed = UUID(value)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("Revision ID must be a canonical UUID") from exc
+        if str(parsed) != value:
+            raise ValueError("Revision ID must be a canonical UUID")
+        return value
+
+    @classmethod
+    def _normalize_cleanup_chunk_ids(cls, chunk_ids: Sequence[str] | None) -> tuple[str, ...]:
+        if chunk_ids is None:
+            return ()
+        if isinstance(chunk_ids, (str, bytes)) or not isinstance(chunk_ids, Sequence):
+            raise ValueError("LightRAG cleanup manifest is malformed")
+        normalized: set[str] = set()
+        for chunk_id in chunk_ids:
+            if not cls._valid_entity_chunk_id(chunk_id):
+                raise ValueError("LightRAG cleanup manifest contains an invalid chunk ID")
+            normalized.add(chunk_id)
+            if len(normalized) > _MAX_CLEANUP_CHUNKS:
+                raise RuntimeError(
+                    "LightRAG document cleanup manifest exceeds the supported limit"
+                )
+        return tuple(sorted(normalized))
+
+    @staticmethod
+    async def _strict_get(storage: Any, key: str) -> Any:
+        getter = getattr(storage, "get_by_id_strict", None)
+        if not callable(getter):
+            raise RuntimeError("LightRAG storage does not support strict point reads")
+        return await getter(key)
+
+    @staticmethod
+    async def _strict_get_many(storage: Any, keys: tuple[str, ...]) -> list[Any]:
+        if not keys:
+            return []
+        getter = getattr(storage, "get_by_ids", None)
+        if not callable(getter):
+            raise RuntimeError("LightRAG storage does not support strict bulk reads")
+        records = await getter(list(keys))
+        if not isinstance(records, list) or len(records) != len(keys):
+            raise RuntimeError("LightRAG storage returned an incomplete bulk read")
+        for key, record in zip(keys, records, strict=True):
+            if record is not None and not isinstance(record, dict):
+                raise RuntimeError("LightRAG storage returned a malformed bulk read")
+            if isinstance(record, dict) and record.get("id") != key:
+                raise RuntimeError("LightRAG storage returned a mismatched bulk read")
+        return records
+
+    @staticmethod
+    def _normalize_deletion_result(result: Any, doc_id: str) -> str:
+        if isinstance(result, dict):
+            returned_id = result.get("doc_id")
+            status = result.get("status")
+        else:
+            returned_id = getattr(result, "doc_id", None)
+            status = getattr(result, "status", None)
+        if (
+            not isinstance(returned_id, str)
+            or returned_id != doc_id
+            or not isinstance(status, str)
+            or status not in {"success", "not_found", "not_allowed", "fail"}
+        ):
+            raise RuntimeError("LightRAG returned a malformed document deletion result")
+        return status
+
+    @staticmethod
+    async def _await_core_deletion(operation: Awaitable[Any]) -> Any:
+        task = asyncio.ensure_future(operation)
+        cancellation_requested = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                caller = asyncio.current_task()
+                if task.done():
+                    cancellation_requested = bool(caller and caller.cancelling())
+                    result = task.result()
+                    break
+                if caller is None or not caller.cancelling():
+                    raise
+                cancellation_requested = True
+        if cancellation_requested:
+            raise asyncio.CancelledError
+        return result
+
+    @classmethod
+    async def _assert_revision_absent(
+        cls, rag: Any, doc_id: str, chunk_ids: tuple[str, ...]
+    ) -> None:
+        for storage_name in ("doc_status", "full_docs", "full_entities", "full_relations"):
+            record = await cls._strict_get(getattr(rag, storage_name, None), doc_id)
+            if record is not None:
+                raise RuntimeError("LightRAG document cleanup left document data behind")
+
+        chunk_records = await cls._strict_get_many(rag.text_chunks, chunk_ids)
+        if any(record is not None for record in chunk_records):
+            raise RuntimeError("LightRAG document cleanup left owned text chunks behind")
 
     async def retrieve(self, query: str, *, mode: QueryMode = "mix") -> dict[str, Any]:
         from lightrag import QueryParam

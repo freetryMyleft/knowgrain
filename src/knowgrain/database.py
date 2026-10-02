@@ -18,7 +18,7 @@ from knowgrain.models import (
 )
 
 
-EXPECTED_SCHEMA_REVISION = "0010_m5_source_lifecycle"
+EXPECTED_SCHEMA_REVISION = "0011_m5_core_maintenance"
 _VAULT_BINDING_LOCK_KEYS = (1263420247, 1196575049)
 
 
