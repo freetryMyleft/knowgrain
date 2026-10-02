@@ -3,6 +3,7 @@ import VaultSettings from './VaultSettings'
 import SourceLifecyclePanel from './SourceLifecyclePanel'
 import CoreMaintenancePanel from './CoreMaintenancePanel'
 import SourceFileOperationPanel from './SourceFileOperationPanel'
+import ReconciliationPanel from './ReconciliationPanel'
 const WikiWorkspace = lazy(() => import('./WikiWorkspace'))
 const QuestionsWorkspace = lazy(() => import('./QuestionsWorkspace'))
 
@@ -657,6 +658,7 @@ export default function App() {
               <Icon name="refresh" size={14} />{reconnecting ? '正在重连…' : '重连服务'}
             </button>
             <p className="service-hint">索引模型未就绪时，资料仍可保存；索引任务会等待模型恢复。</p>
+            <ReconciliationPanel refreshToken={health} />
           </section>
 
           <div className="sidebar-bottom">

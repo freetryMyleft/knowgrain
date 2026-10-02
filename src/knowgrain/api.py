@@ -27,6 +27,7 @@ from knowgrain.entity_mapping_service import EntityMappingService
 from knowgrain.query_api import install_query_routes
 from knowgrain.query_repository import QueryRepository
 from knowgrain.query_service import QueryService
+from knowgrain.reconciliation import ReconciliationService
 from knowgrain.database import ApplicationDatabase
 from knowgrain.job_runner import IndexJobRunner
 from knowgrain.lightrag_runtime import LightRAGRuntime
@@ -68,6 +69,7 @@ class ReadyResponse(BaseModel):
     app_database: str
     vault: str
     wiki: str = "unavailable"
+    reconciliation: str = "pending"
     detail: str | None = None
 
 
@@ -135,6 +137,7 @@ class ApplicationRuntime:
     query_repository: QueryRepository = field(init=False)
     queries: QueryService = field(init=False)
     entity_mapping: EntityMappingService = field(init=False)
+    reconciliation: ReconciliationService = field(init=False)
     vault_ready: bool = field(default=False, init=False)
     vault_error: str | None = field(default=None, init=False)
     initialization_error: str | None = field(default=None, init=False)
@@ -151,6 +154,9 @@ class ApplicationRuntime:
         self.vault = VaultStore(Path.cwd())
         self.vault_setup = VaultSetupService(self.settings, self.database)
         self._install_source_files(self.vault)
+        self.reconciliation = ReconciliationService(
+            self.repository, self.lightrag, self.vault, self._file_lock,
+        )
         self.jobs = IndexJobRunner(self.database, self.repository, self.vault, self.lightrag)
         self.maintenance = CoreMaintenanceRunner(self.database, self.repository, self.lightrag)
         self.wiki_repository = WikiRepository(self.database)
@@ -199,12 +205,8 @@ class ApplicationRuntime:
             else:
                 self.vault_ready = True
                 self.vault_error = None
-                self.jobs.start()
                 self.file_jobs.start()
-                self.maintenance.start()
                 await self._start_wiki()
-                self.generation.start()
-                await self.queries.start()
             if self.lightrag.restart_required:
                 self.initialization_error = (
                     self.lightrag.restart_required_detail
@@ -226,7 +228,7 @@ class ApplicationRuntime:
                         )
                         return False
                 self.initialization_error = None
-                return True
+                return await self._start_core_jobs()
 
             try:
                 await self.lightrag.start()
@@ -240,11 +242,29 @@ class ApplicationRuntime:
                 return False
 
             self.initialization_error = None
-            return True
+            return await self._start_core_jobs()
+
+    async def _start_core_jobs(self) -> bool:
+        if not self.database.is_ready or not self.vault_ready or not self.lightrag.is_ready:
+            return False
+        try:
+            await self.reconciliation.run()
+        except Exception:
+            self.initialization_error = self.reconciliation.report["detail"]
+            logger.warning("Startup index reconciliation did not complete")
+            return False
+        self.jobs.start()
+        self.maintenance.start()
+        self.generation.start()
+        await self.queries.start()
+        return True
 
     def _install_vault(self, vault: VaultStore) -> None:
         self.vault = vault
         self._install_source_files(vault)
+        self.reconciliation = ReconciliationService(
+            self.repository, self.lightrag, vault, self._file_lock,
+        )
         self.jobs = IndexJobRunner(self.database, self.repository, vault, self.lightrag)
         self.wiki = WikiService(vault, self.wiki_repository)
         self.generation = GenerationService(
@@ -327,12 +347,9 @@ class ApplicationRuntime:
                 raise
             self.vault_ready = True
             self.vault_error = None
-            self.jobs.start()
             self.file_jobs.start()
-            self.maintenance.start()
             await self._start_wiki()
-            self.generation.start()
-            await self.queries.start()
+            await self._start_core_jobs()
             return await self.vault_setup.status(ready=True, detail=None)
 
     def _redact_detail(self, detail: str) -> str:
@@ -384,12 +401,14 @@ class ApplicationRuntime:
                 application_probe[1],
                 self.vault_error,
                 self.wiki.last_error,
+                self.reconciliation.report["detail"],
             )
             if detail
         ]
         is_ready = (
             lightrag_ready and probes["postgres_ready"] and probes["ollama_ready"]
             and application_probe[0] and self.vault_ready and self.wiki.last_error is None
+            and self.reconciliation.report["state"] == "complete"
         )
         if self.lightrag.restart_required:
             lightrag_status = "restart_required"
@@ -403,6 +422,7 @@ class ApplicationRuntime:
             app_database="ready" if application_probe[0] else "unavailable",
             vault="ready" if self.vault_ready else "unavailable",
             wiki="ready" if self.vault_ready and self.wiki.last_error is None else "unavailable",
+            reconciliation=self.reconciliation.report["state"],
             detail="; ".join(details) or None,
         )
 
@@ -579,13 +599,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/sources/{source_id}/reindex", status_code=202, tags=["sources"])
     async def retry_source(request: Request, source_id: UUID):
+        state = request.app.state.runtime
         try:
-            job_id = await source_runtime(request).repository.retry_source(source_id)
+            async with state._runtime_lock:
+                job_id = await source_runtime(request).repository.retry_source(source_id)
         except SourceNotFoundError as exc:
             raise HTTPException(404, "资料不存在") from exc
         except SourceConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"job_id": str(job_id)}
+
+    @app.get("/api/v1/system/reconciliation", tags=["system"])
+    async def reconciliation_status(request: Request):
+        state = request.app.state.runtime
+        async with state._runtime_lock:
+            if not state.database.is_ready:
+                raise HTTPException(503, "应用数据库未就绪")
+            return dict(state.reconciliation.report)
 
     @app.get("/api/v1/jobs/{job_id}", tags=["jobs"])
     async def get_job(request: Request, job_id: UUID):

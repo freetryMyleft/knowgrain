@@ -12,6 +12,7 @@ from knowgrain.models import (
     GenerationJob,
     QueryJob,
     SourceDocument,
+    SourceFileOperation,
     SourceRevision,
     VaultBinding,
     WikiPage,
@@ -101,6 +102,51 @@ class ApplicationDatabase:
                 )
             )
             return [(str(path), str(digest)) for path, digest in rows]
+
+    async def list_source_file_expectations(self) -> list[dict[str, Any]]:
+        """Capture source lifecycle, all revisions and current file intents together."""
+        async with self.session_factory() as session:
+            rows = (await session.execute(
+                select(
+                    SourceDocument.id, SourceDocument.state,
+                    SourceRevision.id, SourceRevision.vault_path, SourceRevision.sha256,
+                    SourceFileOperation.kind, SourceFileOperation.state,
+                )
+                .join(SourceRevision, SourceRevision.source_id == SourceDocument.id)
+                .outerjoin(SourceFileOperation, (
+                    (SourceFileOperation.source_id == SourceDocument.id)
+                    & (SourceFileOperation.lifecycle_version == SourceDocument.lifecycle_version)
+                    & (SourceFileOperation.state != "cancelled")
+                ))
+                .order_by(SourceDocument.id, SourceRevision.id)
+            )).all()
+        grouped: dict[UUID, dict[str, Any]] = {}
+        for source_id, state, revision_id, path, digest, kind, operation_state in rows:
+            item = grouped.setdefault(source_id, {
+                "source_id": source_id, "state": state, "entries": {}, "operations": set(),
+            })
+            item["entries"][revision_id] = (revision_id, path, digest)
+            if kind is not None:
+                item["operations"].add((kind, operation_state))
+        result = []
+        for item in grouped.values():
+            operations = item["operations"]
+            if item["state"] == "active":
+                allowed = ("vault",)
+            elif any(kind == "restore" for kind, _ in operations):
+                allowed = ("vault", "trash")
+            elif ("archive", "succeeded") in operations:
+                allowed = ("trash",)
+            elif any(kind == "archive" for kind, _ in operations):
+                allowed = ("vault", "trash")
+            else:
+                allowed = ("vault",)
+            result.append({
+                "source_id": item["source_id"],
+                "entries": list(item["entries"].values()),
+                "allowed_locations": allowed,
+            })
+        return result
 
     async def compare_and_set_vault_binding(
         self,

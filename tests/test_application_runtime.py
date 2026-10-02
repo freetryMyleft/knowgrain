@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from knowgrain.api import ApplicationRuntime
@@ -12,6 +12,46 @@ from knowgrain.vault_setup import VaultPathSetupError
 
 
 class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_core_inspection_gates_model_jobs_but_keeps_file_recovery(self):
+        runtime = ApplicationRuntime(Settings(_env_file=None))
+        runtime.lightrag._rag = object()
+
+        async def database_ready():
+            runtime.database.is_ready = True
+            return True
+
+        with (
+            patch.object(runtime.database, "initialize", side_effect=database_ready),
+            patch.object(runtime.vault_setup, "initialize", new_callable=AsyncMock,
+                         return_value=(runtime.vault, {})),
+            patch.object(ApplicationRuntime, "_install_vault"),
+            patch.object(ApplicationRuntime, "_start_wiki", new_callable=AsyncMock) as wiki,
+            patch.object(runtime.queries, "stop", new_callable=AsyncMock),
+            patch.object(runtime.generation, "stop", new_callable=AsyncMock),
+            patch.object(runtime.file_jobs, "stop", new_callable=AsyncMock),
+            patch.object(runtime.maintenance, "stop", new_callable=AsyncMock),
+            patch.object(runtime.jobs, "stop", new_callable=AsyncMock),
+            patch.object(runtime.wiki, "stop", new_callable=AsyncMock),
+            patch.object(runtime.reconciliation, "run", new_callable=AsyncMock,
+                         side_effect=RuntimeError("transport unavailable")),
+            patch.object(runtime.jobs, "start", new_callable=MagicMock) as indexing,
+            patch.object(runtime.maintenance, "start", new_callable=MagicMock) as cleanup,
+            patch.object(runtime.generation, "start", new_callable=MagicMock) as generation,
+            patch.object(runtime.queries, "start", new_callable=AsyncMock) as query,
+            patch.object(runtime.file_jobs, "start", new_callable=MagicMock) as files,
+        ):
+            self.assertFalse(await runtime.initialize())
+            self.assertTrue(runtime.vault_ready)
+            files.assert_called_once()
+            wiki.assert_awaited_once()
+            indexing.assert_not_called()
+            cleanup.assert_not_called()
+            generation.assert_not_called()
+            query.assert_not_awaited()
+        runtime.lightrag._rag = None
+        runtime.database.is_ready = False
+        await runtime.close()
+
     async def test_vault_failure_pauses_claims_and_retry_recovers(self):
         with TemporaryDirectory() as temporary:
             runtime = ApplicationRuntime(Settings(
@@ -55,6 +95,7 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(runtime.database, "initialize", side_effect=initialize_database),
                     patch.object(runtime.vault_setup, "initialize", side_effect=initialize_vault),
                     patch.object(runtime.repository, "claim_job", side_effect=claim),
+                    patch.object(runtime.repository, "list_reconciliation_candidates", new_callable=AsyncMock, return_value=[]),
                     patch.object(runtime.repository, "release_owner", new_callable=AsyncMock),
                     patch.object(runtime.repository, "claim_maintenance", new_callable=AsyncMock, return_value=None),
                     patch.object(runtime.repository, "release_maintenance_owner", new_callable=AsyncMock),

@@ -14,6 +14,8 @@ from uuid import UUID
 from knowgrain.config import Settings
 from knowgrain.database import ApplicationDatabase, VaultBindingConflict
 from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
+from knowgrain.source_archive_files import ArchiveEntry, SourceArchiveFiles, SourceArchiveFileError
+from knowgrain.source_service import _thread_call_drained
 from knowgrain.vault import VaultStore
 from knowgrain.wiki_files import WikiFileStore
 
@@ -375,7 +377,31 @@ class VaultSetupService:
                     raise VaultPathSetupError("A Vault write check could not be cleaned up.") from exc
 
     async def _verify_originals(self, root: Path, originals: list[tuple[str, str]]) -> None:
-        await asyncio.to_thread(self._verify_originals_sync, root, originals)
+        expectations = await self.database.list_source_file_expectations()
+        if expectations:
+            await _thread_call_drained(self._verify_locations_sync, root, expectations)
+        else:
+            # Legacy adoption can include noncanonical paths. Such originals
+            # still require the existing safe hash checks before binding.
+            await _thread_call_drained(self._verify_originals_sync, root, originals)
+
+    @staticmethod
+    def _verify_locations_sync(root: Path, expectations: list[dict[str, Any]]) -> None:
+        files = SourceArchiveFiles(VaultStore(root))
+        try:
+            for expected in expectations:
+                entries = [ArchiveEntry(*values) for values in expected["entries"]]
+                location = files.location(expected["source_id"], entries)
+                if location not in expected["allowed_locations"]:
+                    raise VaultPathSetupError(
+                        "Source original location conflicts with its lifecycle/file journal; "
+                        "restore the expected directory before initialization."
+                    )
+        except SourceArchiveFileError as exc:
+            raise VaultPathSetupError(
+                "Source original directories are missing, changed or unsafe; "
+                "Vault initialization is blocked."
+            ) from exc
 
     @staticmethod
     def _verify_originals_sync(root: Path, originals: list[tuple[str, str]]) -> None:

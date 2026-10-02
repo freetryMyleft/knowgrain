@@ -30,12 +30,16 @@ class MemoryDatabase:
         self.binding = None
         self.source_count = source_count
         self.originals = list(originals or [])
+        self.file_expectations = []
 
     async def get_vault_state(self):
         return self.binding, self.source_count
 
     async def list_source_originals(self):
         return list(self.originals)
+
+    async def list_source_file_expectations(self):
+        return self.file_expectations
 
     async def compare_and_set_vault_binding(
         self, *, expected_binding_id, expected_root, target_root
@@ -245,6 +249,62 @@ class VaultSetupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(VaultPathSetupError):
             await self.service.initialize()
         self.assertIsNone(self.database.binding)
+
+    async def test_lifecycle_and_journal_reject_unlogged_active_trash_and_duplicate(self):
+        source_id, revision_id = uuid4(), uuid4()
+        vault = VaultStore(self.configured)
+        vault.initialize()
+        content = b"Source lifecycle must agree with its physical directory."
+        path = vault.write_source(source_id, revision_id, "notes.txt", content)
+        self.database.source_count = 1
+        self.database.originals = [(path, hashlib.sha256(content).hexdigest())]
+        self.database.file_expectations = [{
+            "source_id": source_id,
+            "entries": [(revision_id, path, hashlib.sha256(content).hexdigest())],
+            "allowed_locations": ("vault",),
+        }]
+        source = self.configured / "Sources/Files" / str(source_id)
+        trash = self.configured / "Trash/Files" / str(source_id)
+        source.rename(trash)
+        with self.assertRaises(VaultPathSetupError):
+            await self.service.initialize()
+        self.assertIsNone(self.database.binding)
+
+        # A persisted move intention makes either single location replayable.
+        self.database.file_expectations[0]["allowed_locations"] = ("vault", "trash")
+        await self.service.initialize()
+        self.assertEqual((trash / f"{revision_id}.txt").read_bytes(), content)
+
+        source.mkdir()
+        (source / f"{revision_id}.txt").write_bytes(content)
+        with self.assertRaises(VaultPathSetupError):
+            await self.service.initialize()
+        self.assertEqual((source / f"{revision_id}.txt").read_bytes(), content)
+        self.assertEqual((trash / f"{revision_id}.txt").read_bytes(), content)
+
+    async def test_completed_archive_requires_trash_and_rejects_extra_member(self):
+        source_id, revision_id = uuid4(), uuid4()
+        vault = VaultStore(self.configured)
+        vault.initialize()
+        content = b"A completed archive must already be in Trash."
+        path = vault.write_source(source_id, revision_id, "notes.txt", content)
+        self.database.source_count = 1
+        self.database.originals = [(path, hashlib.sha256(content).hexdigest())]
+        self.database.file_expectations = [{
+            "source_id": source_id,
+            "entries": [(revision_id, path, hashlib.sha256(content).hexdigest())],
+            "allowed_locations": ("trash",),
+        }]
+        with self.assertRaises(VaultPathSetupError):
+            await self.service.initialize()
+        source = self.configured / "Sources/Files" / str(source_id)
+        trash = self.configured / "Trash/Files" / str(source_id)
+        source.rename(trash)
+        await self.service.initialize()
+        (trash / "unregistered.txt").write_bytes(b"Must not silently discard this file")
+        with self.assertRaises(VaultPathSetupError):
+            await self.service.initialize()
+        self.assertEqual((trash / "unregistered.txt").read_bytes(), b"Must not silently discard this file")
 
     async def test_changed_legacy_original_fails_closed_before_directory_creation(self):
         relative = "Sources/Files/source/revision.txt"

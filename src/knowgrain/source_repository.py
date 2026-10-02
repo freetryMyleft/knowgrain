@@ -28,6 +28,7 @@ _LEASE_DURATION = timedelta(seconds=90)
 _MAX_ERROR_LENGTH = 4000
 _MAX_CLEANUP_CHUNKS = 10_000
 _MAINTENANCE_CLEANED_ERROR = "已清理索引，恢复后将重建"
+_RECONCILIATION_REASONS = frozenset({"missing", "inconsistent", "invalid_metadata"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +166,183 @@ class SourceRepository:
                 self._source_snapshot_for_revisions(source, latest, current)
                 for source, latest, current in rows
             ]
+
+    async def list_reconciliation_candidates(
+        self,
+        *,
+        after_source_id: uuid.UUID | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List the bounded set of sources whose ready index can be reconciled."""
+        if after_source_id is not None and not isinstance(after_source_id, uuid.UUID):
+            raise ValueError("after_source_id must be a UUID or None")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+
+        maintenance_chunks = (
+            select(func.jsonb_agg(CoreMaintenanceJob.cleanup_chunk_ids))
+            .where(
+                CoreMaintenanceJob.revision_id == SourceRevision.id,
+                CoreMaintenanceJob.cleanup_chunk_ids.is_not(None),
+            )
+            .correlate(SourceRevision)
+            .scalar_subquery()
+        )
+        unfinished_file_operation = (
+            select(SourceFileOperation.id)
+            .where(
+                SourceFileOperation.source_id == SourceDocument.id,
+                SourceFileOperation.state.in_(("queued", "running")),
+            )
+            .exists()
+        )
+        statement = (
+            select(
+                SourceDocument.id,
+                SourceDocument.lifecycle_version,
+                SourceRevision.id,
+                SourceRevision.filename,
+                SourceRevision.vault_path,
+                SourceRevision.sha256,
+                SourceRevision.parsed_text_sha256,
+                SourceRevision.indexed_at,
+                Job.id,
+                Job.updated_at,
+                Job.cleanup_chunk_ids,
+                maintenance_chunks,
+            )
+            .join(
+                SourceRevision,
+                SourceRevision.id == SourceDocument.current_revision_id,
+            )
+            .join(Job, Job.revision_id == SourceRevision.id)
+            .where(
+                SourceDocument.state == "active",
+                SourceDocument.current_revision_id.is_not(None),
+                SourceDocument.current_revision_id == SourceDocument.latest_revision_id,
+                SourceRevision.index_state == "ready",
+                Job.kind == "index",
+                Job.state == "succeeded",
+                ~unfinished_file_operation,
+            )
+            .order_by(SourceDocument.id.asc())
+            .limit(limit)
+        )
+        if after_source_id is not None:
+            statement = statement.where(SourceDocument.id > after_source_id)
+
+        async with self.database.session_factory() as session:
+            rows = (await session.execute(statement)).all()
+
+        candidates: list[dict] = []
+        for (
+            source_id,
+            lifecycle_version,
+            revision_id,
+            filename,
+            vault_path,
+            sha256,
+            parsed_text_sha256,
+            indexed_at,
+            job_id,
+            job_updated_at,
+            index_chunks,
+            maintenance_chunk_groups,
+        ) in rows:
+            cleanup_chunk_ids = self._merge_reconciliation_cleanup_chunks(
+                index_chunks, maintenance_chunk_groups
+            )
+            candidates.append(
+                {
+                    "source_id": str(source_id),
+                    "revision_id": str(revision_id),
+                    "job_id": str(job_id),
+                    "lifecycle_version": lifecycle_version,
+                    "vault_path": vault_path,
+                    "filename": filename,
+                    "sha256": sha256,
+                    "parsed_text_sha256": parsed_text_sha256,
+                    "indexed_at": indexed_at,
+                    "job_updated_at": job_updated_at,
+                    "cleanup_chunk_ids": cleanup_chunk_ids,
+                }
+            )
+        return candidates
+
+    async def queue_reconciliation_repair(
+        self,
+        candidate: dict,
+        *,
+        chunk_ids: Sequence[str] = (),
+        reason: str,
+    ) -> uuid.UUID | None:
+        """Queue a force rebuild only if the supplied reconciliation snapshot is current."""
+        snapshot = self._validate_reconciliation_candidate(candidate)
+        if not isinstance(reason, str) or reason not in _RECONCILIATION_REASONS:
+            raise ValueError("reason must be a supported reconciliation reason")
+        supplied_chunks = self._normalize_cleanup_chunks(chunk_ids)
+
+        async with self.database.session_factory() as session, session.begin():
+            source = await session.scalar(
+                select(SourceDocument)
+                .where(SourceDocument.id == snapshot["source_id"])
+                .with_for_update()
+            )
+            if source is None:
+                return None
+
+            # Keep this order aligned with the other source lifecycle transactions.
+            index_jobs = await self._lock_source_index_jobs(session, source.id)
+            maintenance_jobs = await self._lock_source_maintenance_jobs(session, source.id)
+            file_operations = await self._lock_source_file_operations(session, source.id)
+            revisions = await self._lock_source_revisions(session, source.id)
+
+            revision = next(
+                (row for row in revisions if row.id == snapshot["revision_id"]), None
+            )
+            job = next((row for row in index_jobs if row.id == snapshot["job_id"]), None)
+            if revision is None or job is None:
+                return None
+            if (
+                source.state != "active"
+                or source.lifecycle_version != snapshot["lifecycle_version"]
+                or source.current_revision_id != snapshot["revision_id"]
+                or source.latest_revision_id != snapshot["revision_id"]
+                or revision.source_id != source.id
+                or revision.index_state != "ready"
+                or revision.filename != snapshot["filename"]
+                or revision.vault_path != snapshot["vault_path"]
+                or revision.sha256 != snapshot["sha256"]
+                or revision.parsed_text_sha256 != snapshot["parsed_text_sha256"]
+                or revision.indexed_at != snapshot["indexed_at"]
+                or job.revision_id != revision.id
+                or job.kind != "index"
+                or job.state != "succeeded"
+                or job.updated_at != snapshot["job_updated_at"]
+                or any(operation.state in {"queued", "running"} for operation in file_operations)
+            ):
+                return None
+
+            now = await self._database_now(session)
+            durable_chunks = self._merge_cleanup_manifests(
+                revision.id, index_jobs, maintenance_jobs
+            )
+            job.cleanup_chunk_ids = list(
+                self._normalize_cleanup_chunks(
+                    (*(durable_chunks or ()), *supplied_chunks)
+                )
+            )
+            job.state = "queued"
+            job.lease_owner = None
+            job.lease_until = None
+            job.error = None
+            job.force_rebuild = True
+            job.updated_at = now
+            revision.index_state = "queued"
+            revision.error = None
+            source.current_revision_id = None
+            await session.flush()
+            return job.id
 
     async def get_source(self, source_id: uuid.UUID) -> dict | None:
         async with self.database.session_factory() as session:
@@ -1072,6 +1250,122 @@ class SourceRepository:
                 raise ValueError("chunk IDs must not contain control characters")
             unique.setdefault(chunk_id, None)
         return tuple(unique)
+
+    @classmethod
+    def _merge_reconciliation_cleanup_chunks(
+        cls,
+        index_chunks: object,
+        maintenance_chunk_groups: object,
+    ) -> list[str]:
+        known: set[str] = set()
+        if index_chunks is not None:
+            try:
+                known.update(cls._normalize_cleanup_chunks(index_chunks))  # type: ignore[arg-type]
+            except ValueError:
+                raise SourceConflictError("Stored cleanup manifest is invalid") from None
+        if maintenance_chunk_groups is not None:
+            if not isinstance(maintenance_chunk_groups, list):
+                raise SourceConflictError("Stored cleanup manifest is invalid")
+            for chunks in maintenance_chunk_groups:
+                try:
+                    known.update(cls._normalize_cleanup_chunks(chunks))
+                except ValueError:
+                    raise SourceConflictError("Stored cleanup manifest is invalid") from None
+                if len(known) > _MAX_CLEANUP_CHUNKS:
+                    raise SourceConflictError("Stored cleanup manifest exceeds the supported limit")
+        return sorted(known)
+
+    @classmethod
+    def _validate_reconciliation_candidate(cls, candidate: dict) -> dict:
+        if not isinstance(candidate, dict):
+            raise ValueError("candidate must be a reconciliation candidate object")
+        required = {
+            "source_id",
+            "revision_id",
+            "job_id",
+            "lifecycle_version",
+            "vault_path",
+            "filename",
+            "sha256",
+            "parsed_text_sha256",
+            "indexed_at",
+            "job_updated_at",
+            "cleanup_chunk_ids",
+        }
+        if not required.issubset(candidate):
+            raise ValueError("candidate is missing required reconciliation fields")
+
+        parsed_uuids: dict[str, uuid.UUID] = {}
+        for field in ("source_id", "revision_id", "job_id"):
+            value = candidate[field]
+            if not isinstance(value, str):
+                raise ValueError(f"candidate {field} must be a canonical UUID")
+            try:
+                parsed = uuid.UUID(value)
+            except (ValueError, AttributeError, TypeError):
+                raise ValueError(f"candidate {field} must be a canonical UUID") from None
+            if str(parsed) != value:
+                raise ValueError(f"candidate {field} must be a canonical UUID")
+            parsed_uuids[field] = parsed
+
+        lifecycle_version = candidate["lifecycle_version"]
+        if (
+            isinstance(lifecycle_version, bool)
+            or not isinstance(lifecycle_version, int)
+            or not 0 <= lifecycle_version <= 9_223_372_036_854_775_807
+        ):
+            raise ValueError("candidate lifecycle_version must be a nonnegative integer")
+
+        for field, maximum in (("filename", 1024), ("vault_path", 2048)):
+            value = candidate[field]
+            if not isinstance(value, str) or not 1 <= len(value) <= maximum:
+                raise ValueError(f"candidate {field} is invalid")
+
+        sha256 = candidate["sha256"]
+        if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+            raise ValueError("candidate sha256 must be a lowercase SHA-256 digest")
+        parsed_text_sha256 = candidate["parsed_text_sha256"]
+        if parsed_text_sha256 is not None and (
+            not isinstance(parsed_text_sha256, str) or len(parsed_text_sha256) > 64
+        ):
+            raise ValueError("candidate parsed_text_sha256 must be null or at most 64 characters")
+
+        timestamps: dict[str, datetime | None] = {}
+        if candidate["indexed_at"] is None:
+            timestamps["indexed_at"] = None
+        else:
+            value = candidate["indexed_at"]
+            if (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() is None
+            ):
+                raise ValueError("candidate indexed_at must be null or a timezone-aware datetime")
+            timestamps["indexed_at"] = value
+        job_updated_at = candidate["job_updated_at"]
+        if (
+            not isinstance(job_updated_at, datetime)
+            or job_updated_at.tzinfo is None
+            or job_updated_at.utcoffset() is None
+        ):
+            raise ValueError("candidate job_updated_at must be a timezone-aware datetime")
+        timestamps["job_updated_at"] = job_updated_at
+
+        try:
+            cleanup_chunks = cls._normalize_cleanup_chunks(candidate["cleanup_chunk_ids"])
+        except ValueError as exc:
+            raise ValueError(f"candidate cleanup_chunk_ids is invalid: {exc}") from None
+
+        return {
+            **parsed_uuids,
+            "lifecycle_version": lifecycle_version,
+            "filename": candidate["filename"],
+            "vault_path": candidate["vault_path"],
+            "sha256": sha256,
+            "parsed_text_sha256": parsed_text_sha256,
+            **timestamps,
+            "cleanup_chunk_ids": cleanup_chunks,
+        }
 
     @classmethod
     def _merge_cleanup_manifests(

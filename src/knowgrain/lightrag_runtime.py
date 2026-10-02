@@ -469,6 +469,289 @@ class LightRAGRuntime:
 
             await self._assert_revision_absent(rag, doc_id, manifest)
 
+    async def inspect_revision(
+        self,
+        *,
+        source_id: str,
+        expected_text_sha256: str,
+        expected_chunk_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Inspect revision-owned Core records without mutating LightRAG.
+
+        This verifies the persisted document, recovery-anchor, status, and
+        text-chunk records using strict point reads. Chunk IDs in the pinned
+        Core can be positional or custom, so this checks their stored shape
+        and manifest membership without deriving IDs from chunk text. It does
+        not inspect the vector or graph stores or prove each chunk body against
+        the full document; ``healthy`` is limited to the checked records.
+        """
+        doc_id = self._canonical_revision_id(source_id)
+        if (
+            not isinstance(expected_text_sha256, str)
+            or len(expected_text_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_text_sha256)
+        ):
+            raise ValueError("Expected text SHA-256 must be lowercase hexadecimal")
+        expected_chunks = self._normalize_inspection_chunk_ids(expected_chunk_ids)
+
+        async with self._write_lock:
+            rag = self._require_started()
+            try:
+                # Read every per-document store even when one is already
+                # absent. A miss is meaningful only when strict reads have
+                # positively established the whole known revision is absent.
+                status = await self._strict_get(rag.doc_status, doc_id)
+                full_doc = await self._strict_get(rag.full_docs, doc_id)
+                full_entities = await self._strict_get(rag.full_entities, doc_id)
+                full_relations = await self._strict_get(rag.full_relations, doc_id)
+
+                if status is None:
+                    known_chunks = expected_chunks
+                elif isinstance(status, dict) and isinstance(status.get("chunks_list"), list):
+                    try:
+                        status_chunks = self._normalize_inspection_core_chunk_ids(
+                            status["chunks_list"]
+                        )
+                    except ValueError:
+                        status_chunks = ()
+                    known_chunks = tuple(sorted(set(status_chunks).union(expected_chunks)))
+                else:
+                    status_chunks = ()
+                    known_chunks = expected_chunks
+
+                chunk_records = await self._inspection_get_many(rag.text_chunks, known_chunks)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Storage exception strings may include SQL, paths, or
+                # connection details. Preserve failure semantics without
+                # exposing provider or database diagnostics.
+                raise RuntimeError("LightRAG revision inspection read failed") from None
+
+            if status is None:
+                if any(record is not None for record in (full_doc, full_entities, full_relations)):
+                    return self._inspection_result(
+                        "inconsistent", (), "orphan_data_without_status"
+                    )
+                if any(record is not None for record in chunk_records):
+                    return self._inspection_result(
+                        "inconsistent", (), "orphan_chunks_without_status"
+                    )
+                return self._inspection_result("missing", (), "revision_missing")
+
+            if not isinstance(status, dict):
+                return self._inspection_result("inconsistent", (), "status_invalid")
+
+            raw_status_chunks = status.get("chunks_list")
+            try:
+                status_chunks = self._normalize_inspection_core_chunk_ids(raw_status_chunks)
+            except ValueError:
+                return self._inspection_result("inconsistent", (), "chunk_manifest_invalid")
+            if status.get("status") != "processed":
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "status_not_processed"
+                )
+            if (
+                not self._is_nonnegative_int(status.get("chunks_count"))
+                or status["chunks_count"] != len(status_chunks)
+            ):
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "chunk_manifest_invalid"
+                )
+
+            if full_doc is None or full_entities is None or full_relations is None:
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "document_record_missing"
+                )
+            if (
+                not isinstance(full_doc, dict)
+                or full_doc.get("id") != doc_id
+                or not isinstance(full_doc.get("content"), str)
+            ):
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "document_record_invalid"
+                )
+            try:
+                actual_text_sha256 = hashlib.sha256(
+                    full_doc["content"].encode("utf-8", errors="strict")
+                ).hexdigest()
+            except UnicodeEncodeError:
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "document_content_invalid"
+                )
+            if actual_text_sha256 != expected_text_sha256:
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "text_hash_mismatch"
+                )
+            if full_doc["content"].strip() and not status_chunks:
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "chunk_manifest_empty"
+                )
+
+            if not self._valid_inspection_entity_anchor(full_entities, doc_id):
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "entity_anchor_invalid"
+                )
+            if not self._valid_inspection_relation_anchor(full_relations, doc_id):
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "relation_anchor_invalid"
+                )
+
+            if expected_chunks and set(expected_chunks) != set(status_chunks):
+                return self._inspection_result(
+                    "inconsistent", status_chunks, "chunk_manifest_mismatch"
+                )
+
+            records_by_id = dict(zip(known_chunks, chunk_records, strict=True))
+            seen_order_indices: set[int] = set()
+            for chunk_id in status_chunks:
+                record = records_by_id.get(chunk_id)
+                if record is None:
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_record_missing"
+                    )
+                if not isinstance(record, dict):
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_record_invalid"
+                    )
+                if record.get("full_doc_id") != doc_id:
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_owner_mismatch"
+                    )
+                if (
+                    record.get("id") != chunk_id
+                    or not self._valid_entity_chunk_id(record.get("id"))
+                    or not isinstance(record.get("content"), str)
+                    or not record["content"]
+                    or not self._is_nonnegative_int(record.get("chunk_order_index"))
+                    or record["chunk_order_index"] in seen_order_indices
+                    or not self._inspection_chunk_order_matches_id(
+                        doc_id, chunk_id, record.get("chunk_order_index")
+                    )
+                ):
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_record_invalid"
+                    )
+                try:
+                    record["content"].encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_record_invalid"
+                    )
+                seen_order_indices.add(record["chunk_order_index"])
+
+            for chunk_id in expected_chunks:
+                record = records_by_id.get(chunk_id)
+                if record is not None and not isinstance(record, dict):
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_record_invalid"
+                    )
+                if record is not None and record.get("full_doc_id") != doc_id:
+                    return self._inspection_result(
+                        "inconsistent", status_chunks, "chunk_owner_mismatch"
+                    )
+
+            return self._inspection_result("healthy", status_chunks, None)
+
+    @classmethod
+    def _normalize_inspection_chunk_ids(cls, chunk_ids: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(chunk_ids, (str, bytes)) or not isinstance(chunk_ids, Sequence):
+            raise ValueError("LightRAG inspection manifest is malformed")
+        if len(chunk_ids) > _MAX_CLEANUP_CHUNKS:
+            raise RuntimeError("LightRAG inspection manifest exceeds the supported limit")
+        normalized: set[str] = set()
+        for chunk_id in chunk_ids:
+            if not cls._valid_entity_chunk_id(chunk_id):
+                raise ValueError("LightRAG inspection manifest contains an invalid chunk ID")
+            normalized.add(chunk_id)
+            if len(normalized) > _MAX_CLEANUP_CHUNKS:
+                raise RuntimeError("LightRAG inspection manifest exceeds the supported limit")
+        return tuple(sorted(normalized))
+
+    @classmethod
+    def _normalize_inspection_core_chunk_ids(cls, chunk_ids: Any) -> tuple[str, ...]:
+        if not isinstance(chunk_ids, list) or len(chunk_ids) > _MAX_CLEANUP_CHUNKS:
+            raise ValueError("Core chunk manifest is malformed")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for chunk_id in chunk_ids:
+            if not cls._valid_entity_chunk_id(chunk_id) or chunk_id in seen:
+                raise ValueError("Core chunk manifest is malformed")
+            seen.add(chunk_id)
+            normalized.append(chunk_id)
+        return tuple(normalized)
+
+    @staticmethod
+    async def _inspection_get_many(storage: Any, keys: tuple[str, ...]) -> list[Any]:
+        if not keys:
+            return []
+        getter = getattr(storage, "get_by_ids", None)
+        if not callable(getter):
+            raise RuntimeError("LightRAG storage does not support strict bulk reads")
+        records = await getter(list(keys))
+        if not isinstance(records, list) or len(records) != len(keys):
+            raise RuntimeError("LightRAG storage returned an incomplete bulk read")
+        return records
+
+    @staticmethod
+    def _is_nonnegative_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    @staticmethod
+    def _inspection_chunk_order_matches_id(
+        doc_id: str, chunk_id: str, order_index: int
+    ) -> bool:
+        positional_prefix = f"{doc_id}-chunk-"
+        if not chunk_id.startswith(positional_prefix):
+            return True
+        suffix = chunk_id[len(positional_prefix):]
+        return not (suffix.isascii() and suffix.isdigit()) or int(suffix) == order_index
+
+    @classmethod
+    def _valid_inspection_entity_anchor(cls, record: Any, doc_id: str) -> bool:
+        names = record.get("entity_names") if isinstance(record, dict) else None
+        count = record.get("count") if isinstance(record, dict) else None
+        return (
+            isinstance(record, dict)
+            and record.get("id") == doc_id
+            and isinstance(names, list)
+            and all(cls._valid_entity_name(name) for name in names)
+            and len(set(names)) == len(names)
+            and cls._is_nonnegative_int(count)
+            and count == len(names)
+        )
+
+    @classmethod
+    def _valid_inspection_relation_anchor(cls, record: Any, doc_id: str) -> bool:
+        pairs = record.get("relation_pairs") if isinstance(record, dict) else None
+        count = record.get("count") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("id") != doc_id
+            or not isinstance(pairs, list)
+        ):
+            return False
+        if not cls._is_nonnegative_int(count) or count != len(pairs):
+            return False
+        normalized: list[tuple[str, str]] = []
+        for pair in pairs:
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or not all(cls._valid_entity_name(name) for name in pair)
+            ):
+                return False
+            normalized.append((pair[0], pair[1]))
+        return len(set(normalized)) == len(normalized)
+
+    @staticmethod
+    def _inspection_result(
+        state: Literal["healthy", "missing", "inconsistent"],
+        chunk_ids: tuple[str, ...],
+        reason: str | None,
+    ) -> dict[str, Any]:
+        return {"state": state, "chunk_ids": chunk_ids, "reason": reason}
+
     @staticmethod
     def _canonical_revision_id(value: Any) -> str:
         if not isinstance(value, str):
