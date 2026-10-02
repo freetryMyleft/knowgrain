@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -19,7 +21,7 @@ class Settings(BaseSettings):
     knowgrain_postgres_db: str = "knowgrain"
     vault_root: Path = Path("./data/vault")
     vault_parent_dir: Path = Path("./data/vaults")
-    max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
+    max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=MAX_UPLOAD_BYTES)
 
     api_host: str = "127.0.0.1"
     api_port: int = 8787

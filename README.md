@@ -68,7 +68,7 @@ Compose 使用 PostgreSQL 18，数据卷挂载到 `/var/lib/postgresql`，遵循
 
 ## 导入资料与查看任务
 
-先执行 `make migrate`（当前迁移为 `0009_m4_entity_lookup`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
+先执行 `make migrate`（当前迁移为 `0010_m5_source_lifecycle`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
 
 Web 顶部的 **Vault 设置** 可以预览和选择 `VAULT_PARENT_DIR` 下的一个文件夹（默认父目录 `./data/vaults`）。只输入文件夹名称，先查看哪些目录已存在、哪些将创建，再点击“使用此 Vault”。预览不写入文件；选择结果保存到应用数据库，重启时使用该绑定，后续改 `VAULT_ROOT` 不会覆盖选择。已有资料或 Wiki 后位置锁定，不能通过设置移动资料；后续迁移/恢复需专门流程。
 

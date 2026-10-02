@@ -154,6 +154,60 @@ class EvidenceAccessTests(unittest.TestCase):
             self.files.original(invalid)
         self.assertEqual(error.exception.code, "unavailable")
 
+    def test_original_revision_returns_only_hash_verified_bounded_bytes(self) -> None:
+        self.assertEqual(
+            self.files.original_revision(
+                self.vault_path, hashlib.sha256(self.source_bytes).hexdigest()
+            ),
+            self.source_bytes,
+        )
+        with self.assertRaises(EvidenceFileError) as changed:
+            self.files.original_revision(self.vault_path, "0" * 64)
+        self.assertEqual(changed.exception.code, "conflict")
+        with self.assertRaises(EvidenceFileError) as malformed_hash:
+            self.files.original_revision(self.vault_path, "A" * 64)
+        self.assertEqual(malformed_hash.exception.code, "unavailable")
+
+    def test_original_revision_rejects_symlinks_and_fifos(self) -> None:
+        original_path = self.vault.resolve(self.vault_path)
+        outside = Path(self.temporary.name) / "outside.txt"
+        outside.write_bytes(self.source_bytes)
+        original_path.unlink()
+        original_path.symlink_to(outside)
+        with self.assertRaises(EvidenceFileError) as symlink_error:
+            self.files.original_revision(
+                self.vault_path, hashlib.sha256(self.source_bytes).hexdigest()
+            )
+        self.assertEqual(symlink_error.exception.code, "unavailable")
+
+        original_path.unlink()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(original_path)
+            with self.assertRaises(EvidenceFileError) as fifo_error:
+                self.files.original_revision(
+                    self.vault_path, hashlib.sha256(self.source_bytes).hexdigest()
+                )
+            self.assertEqual(fifo_error.exception.code, "unavailable")
+
+    def test_large_registered_original_remains_readable_after_upload_limit_changes(self) -> None:
+        # A retained revision can exceed today's default 20 MiB upload limit.
+        size = 65 * 1024 * 1024
+        original_path = self.vault.resolve(self.vault_path)
+        with original_path.open("wb") as target:
+            target.truncate(size)
+        digest = hashlib.sha256()
+        block = bytes(1024 * 1024)
+        for _ in range(65):
+            digest.update(block)
+        content = self.files.original_revision(self.vault_path, digest.hexdigest())
+        self.assertEqual(len(content), size)
+        self.assertEqual(hashlib.sha256(content).hexdigest(), digest.hexdigest())
+        with original_path.open("wb") as target:
+            target.truncate(101 * 1024 * 1024)
+        with self.assertRaises(EvidenceFileError) as oversized:
+            self.files.original_revision(self.vault_path, digest.hexdigest())
+        self.assertEqual(oversized.exception.code, "unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

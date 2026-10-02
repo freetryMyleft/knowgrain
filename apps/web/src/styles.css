@@ -63,6 +63,8 @@ svg { flex-shrink: 0; }
 .primary-button.compact { padding: 8px 10px; font-size: 11px; }
 .secondary-button { background: white; color: #5b6d83; border-color: #d5dce6; }
 .list-tools { padding: 0 17px 13px; }
+.source-state-filter { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; color: var(--text-secondary, #6d7280); }
+.source-state-filter select { flex: 1; min-width: 0; border: 1px solid #d8dce4; border-radius: 7px; padding: 6px 9px; background: #fff; color: #343945; font: inherit; }
 .search-box { display: flex; align-items: center; gap: 7px; border: 1px solid #dfe4ec; border-radius: 7px; background: #edf0f5; color: #8a96a8; padding: 7px 9px; }
 .search-box input { width: 100%; min-width: 0; color: #46566f; font-size: 12px; background: none; border: 0; }
 .search-box input::placeholder { color: #8a96a8; }

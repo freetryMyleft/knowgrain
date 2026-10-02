@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import VaultSettings from './VaultSettings'
+import SourceLifecyclePanel from './SourceLifecyclePanel'
 const WikiWorkspace = lazy(() => import('./WikiWorkspace'))
 const QuestionsWorkspace = lazy(() => import('./QuestionsWorkspace'))
 
@@ -27,7 +28,8 @@ type SourceSnapshot = {
   id?: string
   source_id: string
   filename: string
-  state: string
+  state: 'active' | 'deleted'
+  lifecycle_version: number
   latest_revision_id: string | null
   current_revision_id: string | null
   revision_status: string | null
@@ -240,8 +242,10 @@ export default function App() {
   const [healthError, setHealthError] = useState<string | null>(null)
   const [page, setPage] = useState(0)
   const [filter, setFilter] = useState('')
+  const [sourceState, setSourceState] = useState<'active' | 'deleted'>('active')
   const [uploading, setUploading] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [lifecycleBusy, setLifecycleBusy] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [activeJob, setActiveJob] = useState<JobSnapshot | null>(null)
   const [notice, setNotice] = useState<{ tone: 'positive' | 'negative'; text: string } | null>(null)
@@ -249,6 +253,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRequestRef = useRef(0)
   const detailRequestRef = useRef(0)
+  const lifecycleBusyRef = useRef(false)
   const mountedRef = useRef(true)
   const selectedIdRef = useRef<string | null>(null)
   const uploadTargetRef = useRef<string | null>(null)
@@ -258,11 +263,11 @@ export default function App() {
   const detailLifecycleControllerRef = useRef<AbortController | null>(null)
   const previousPollingStateRef = useRef<{ pending: boolean; selectedId: string | null }>({ pending: false, selectedId: null })
 
-  const refreshList = useCallback(async (signal?: AbortSignal, showLoading = true) => {
+  const refreshList = useCallback(async (signal?: AbortSignal, showLoading = true, query = { state: sourceState, page }) => {
     const requestId = ++listRequestRef.current
     if (showLoading) setListLoading(true)
     try {
-      const result = await requestJson<SourceSnapshot[]>(`/sources?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`, { signal })
+      const result = await requestJson<SourceSnapshot[]>(`/sources?state=${query.state}&limit=${PAGE_SIZE}&offset=${query.page * PAGE_SIZE}`, { signal })
       if (!mountedRef.current || signal?.aborted || requestId !== listRequestRef.current) return
       setSources(Array.isArray(result) ? result : [])
       setListError(null)
@@ -273,7 +278,7 @@ export default function App() {
     } finally {
       if (mountedRef.current && !signal?.aborted && requestId === listRequestRef.current) setListLoading(false)
     }
-  }, [page])
+  }, [page, sourceState])
 
   const refreshHealth = useCallback(async (signal?: AbortSignal) => {
     const requestId = ++healthRequestRef.current
@@ -290,20 +295,30 @@ export default function App() {
   }, [])
 
   const refreshDetail = useCallback(async (sourceId: string, signal?: AbortSignal, showLoading = false) => {
+    if (lifecycleBusyRef.current) return
     const requestId = ++detailRequestRef.current
     if (showLoading) setDetailLoading(true)
     try {
       const result = await requestJson<SourceSnapshot>(`/sources/${encodeURIComponent(sourceId)}`, { signal })
-      if (!mountedRef.current || signal?.aborted || requestId !== detailRequestRef.current || sourceId !== selectedIdRef.current) return
+      if (!mountedRef.current || lifecycleBusyRef.current || signal?.aborted || requestId !== detailRequestRef.current || sourceId !== selectedIdRef.current) return
       setSelected(result)
       setDetailError(null)
     } catch (error) {
-      if (!mountedRef.current || signal?.aborted || requestId !== detailRequestRef.current || sourceId !== selectedIdRef.current) return
+      if (!mountedRef.current || lifecycleBusyRef.current || signal?.aborted || requestId !== detailRequestRef.current || sourceId !== selectedIdRef.current) return
       setDetailError(readableError(error instanceof ApiError ? error.message : error))
     } finally {
       if (mountedRef.current && !signal?.aborted && requestId === detailRequestRef.current && showLoading) setDetailLoading(false)
     }
   }, [])
+
+  const lifecycleBusyChanged = useCallback((busy: boolean) => {
+    lifecycleBusyRef.current = busy
+    if (busy) detailRequestRef.current += 1
+    setLifecycleBusy(busy)
+    if (!busy && selectedIdRef.current) {
+      void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
+    }
+  }, [refreshDetail])
 
   useEffect(() => {
     mountedRef.current = true
@@ -402,10 +417,11 @@ export default function App() {
   const canUpload = health?.app_database === 'ready' && health.vault === 'ready'
   const latestStatus = selected?.latest_revision?.index_state ?? selected?.latest_revision?.state ?? selected?.revision_status
   const latestRevisionId = selected?.latest_revision?.revision_id ?? selected?.latest_revision?.id ?? selected?.latest_revision_id
-  const canRetry = Boolean(selected && latestStatus === 'failed' && latestRevisionId)
+  const canRetry = Boolean(selected?.state === 'active' && latestStatus === 'failed' && latestRevisionId)
   const activeDependencies = health ? [health.app_database, health.vault].every((state) => state === 'ready') : false
 
   const selectSource = (sourceId: string) => {
+    if (lifecycleBusy) return
     selectedIdRef.current = sourceId
     setSelectedId(sourceId)
     setSelected(null)
@@ -420,12 +436,41 @@ export default function App() {
     noticeTimerRef.current = window.setTimeout(() => setNotice(null), 5200)
   }
 
+  const chooseSourceState = (value: 'active' | 'deleted') => {
+    listRequestRef.current += 1
+    detailRequestRef.current += 1
+    detailLifecycleControllerRef.current?.abort()
+    selectedIdRef.current = null
+    setSelectedId(null)
+    setSelected(null)
+    setSources([])
+    activeJobRef.current = null
+    setActiveJob(null)
+    setPage(0)
+    setSourceState(value)
+  }
+
+  const lifecycleChanged = (sourceId: string, value: 'active' | 'deleted') => {
+    if (selectedIdRef.current !== sourceId) return
+    listRequestRef.current += 1
+    setSources([])
+    setPage(0)
+    setSourceState(value)
+    activeJobRef.current = null
+    setActiveJob(null)
+    void refreshDetail(sourceId, detailLifecycleControllerRef.current?.signal)
+    void refreshList(undefined, false, { state: value, page: 0 })
+    showNotice('positive', value === 'deleted' ? '资料已删除，不再参与新问答。可在已删除列表恢复。' : '资料已恢复，索引状态以修订记录为准。')
+  }
+
   const chooseFile = (sourceId: string | null = null) => {
+    if (lifecycleBusy) return
     uploadTargetRef.current = sourceId
     fileInputRef.current?.click()
   }
 
   const uploadFile = async (file: File) => {
+    if (lifecycleBusy) return
     if (!canUpload) {
       showNotice('negative', '应用数据库或 Vault 尚未就绪，暂时无法导入。')
       return
@@ -443,9 +488,13 @@ export default function App() {
       if (!mountedRef.current) return
       selectedIdRef.current = response.source_id
       setSelectedId(response.source_id)
+      listRequestRef.current += 1
+      setSources([])
+      setPage(0)
+      setSourceState('active')
       activeJobRef.current = null
       setActiveJob(null)
-      await refreshList(undefined, false)
+      await refreshList(undefined, false, { state: 'active', page: 0 })
       await refreshDetail(response.source_id, undefined, true)
       const job = await requestJson<JobSnapshot>(`/jobs/${encodeURIComponent(response.job_id)}`)
       if (!mountedRef.current) return
@@ -468,7 +517,7 @@ export default function App() {
   }
 
   const retryIndexing = async () => {
-    if (!selected || !canRetry) return
+    if (!selected || !canRetry || lifecycleBusy) return
     setRetrying(true)
     try {
       const result = await requestJson<{ job_id: string }>(`/sources/${encodeURIComponent(selected.source_id)}/reindex`, { method: 'POST' })
@@ -507,6 +556,7 @@ export default function App() {
   }
 
   const refreshAll = async () => {
+    if (lifecycleBusyRef.current) return
     await Promise.all([refreshList(undefined, false), refreshHealth()])
     if (selectedId) await refreshDetail(selectedId)
   }
@@ -550,10 +600,10 @@ export default function App() {
           <div className="side-current" aria-current="page">
             <Icon name="file" size={17} /><span>资料</span><span className="side-count">{sources.length}</span>
           </div>
-          <button className="side-nav-link" type="button" onClick={() => setWorkspace('wiki')}>
+          <button className="side-nav-link" type="button" disabled={lifecycleBusy} onClick={() => setWorkspace('wiki')}>
             <Icon name="file" size={17} /><span>Wiki</span>
           </button>
-          <button className="side-nav-link" type="button" onClick={() => setWorkspace('questions')}>
+          <button className="side-nav-link" type="button" disabled={lifecycleBusy} onClick={() => setWorkspace('questions')}>
             <span aria-hidden="true">◇</span><span>问答</span>
           </button>
           <div className="sidebar-rule" />
@@ -574,7 +624,7 @@ export default function App() {
               </> : healthError ? <p className="service-error">{healthError}</p> : <div className="skeleton-stack" aria-label="正在检查服务状态"><i /><i /><i /></div>}
             </div>
             {health?.detail && <p className="service-detail">{health.detail}</p>}
-            <button className="reconnect-button" type="button" onClick={() => void reconnect()} disabled={reconnecting}>
+            <button className="reconnect-button" type="button" onClick={() => void reconnect()} disabled={reconnecting || lifecycleBusy}>
               <Icon name="refresh" size={14} />{reconnecting ? '正在重连…' : '重连服务'}
             </button>
             <p className="service-hint">索引模型未就绪时，资料仍可保存；索引任务会等待模型恢复。</p>
@@ -595,14 +645,20 @@ export default function App() {
               <div className="column-kicker">来源库</div>
               <h1>资料</h1>
             </div>
-            <button className="icon-button" type="button" onClick={() => void refreshAll()} aria-label="刷新资料和服务状态" title="刷新">
+            <button className="icon-button" type="button" disabled={lifecycleBusy} onClick={() => void refreshAll()} aria-label="刷新资料和服务状态" title="刷新">
               <Icon name="refresh" size={16} />
             </button>
-            <button className="primary-button compact" type="button" onClick={() => chooseFile()} disabled={!canUpload || uploading}>
+            <button className="primary-button compact" type="button" onClick={() => chooseFile()} disabled={!canUpload || uploading || lifecycleBusy}>
               <Icon name="upload" size={15} />{uploading ? '正在导入…' : '导入资料'}
             </button>
           </div>
           <div className="list-tools">
+            <label className="source-state-filter">显示
+              <select aria-label="资料状态" disabled={lifecycleBusy} value={sourceState} onChange={(event) => chooseSourceState(event.target.value as 'active' | 'deleted')}>
+                <option value="active">有效资料</option>
+                <option value="deleted">已删除</option>
+              </select>
+            </label>
             <label className="search-box">
               <Icon name="search" size={15} />
               <span className="visually-hidden">筛选已加载资料</span>
@@ -620,11 +676,11 @@ export default function App() {
             </div> : null}
             {!listLoading && !listError && sources.length === 0 ? <div className="list-state empty-state">
               <div className="empty-illustration"><div><Icon name="file" size={26} /></div><span /><i /></div>
-              <strong>Vault 里还没有资料</strong>
-              <p>导入 Markdown、TXT、PDF 或 DOCX 文件，原件会保存到 Vault，并排入索引。</p>
-              <button type="button" className="primary-button compact" onClick={() => chooseFile()} disabled={!canUpload || uploading}>
+              <strong>{sourceState === 'deleted' ? '没有已删除资料' : '尚无有效资料'}</strong>
+              <p>{sourceState === 'deleted' ? '删除的资料会显示在这里，可核对原件后恢复。' : '导入 Markdown、TXT、PDF 或 DOCX 文件，原件会保存到 Vault，并排入索引。'}</p>
+              {sourceState === 'active' && <button type="button" className="primary-button compact" onClick={() => chooseFile()} disabled={!canUpload || uploading || lifecycleBusy}>
                 <Icon name="upload" size={15} />导入第一份资料
-              </button>
+              </button>}
             </div> : null}
             {sources.length > 0 && visibleSources.length === 0 ? <div className="list-state filter-empty"><strong>没有匹配的资料</strong><p>试试其他文件名。</p></div> : null}
             {visibleSources.map((source) => {
@@ -633,7 +689,7 @@ export default function App() {
               const state = latest?.index_state ?? latest?.state ?? source.revision_status
               const stateInfo = statusLabel(state)
               const selectedRow = selectedId === sourceId
-              return <button key={sourceId} type="button" className={`source-row ${selectedRow ? 'selected' : ''}`} onClick={() => selectSource(sourceId)} aria-pressed={selectedRow}>
+              return <button key={sourceId} type="button" disabled={lifecycleBusy} className={`source-row ${selectedRow ? 'selected' : ''}`} onClick={() => selectSource(sourceId)} aria-pressed={selectedRow}>
                 <span className={`file-emblem ${fileType(source.filename).toLowerCase()}`}><Icon name="file" size={18} /></span>
                 <span className="source-row-copy">
                   <strong title={source.filename}>{source.filename}</strong>
@@ -647,7 +703,7 @@ export default function App() {
           </div>
           {sources.length > 0 && <div className="list-pagination">
             <span>第 {page + 1} 页 · 每页最多 {PAGE_SIZE} 条</span>
-            <div><button type="button" onClick={previousPage} disabled={page === 0}>上一页</button><button type="button" onClick={nextPage} disabled={sources.length < PAGE_SIZE}>下一页</button></div>
+            <div><button type="button" onClick={previousPage} disabled={lifecycleBusy || page === 0}>上一页</button><button type="button" onClick={nextPage} disabled={lifecycleBusy || sources.length < PAGE_SIZE}>下一页</button></div>
           </div>}
           {listError && sources.length > 0 && <div className="inline-list-error" role="status">刷新失败：{listError} <button type="button" onClick={() => void refreshList(undefined, false)}>重试</button></div>}
         </section>
@@ -670,13 +726,17 @@ export default function App() {
               <div className="inspector-name-wrap"><div className="file-type-label">{fileType(selected.filename)} · 来源资料</div><h2 title={selected.filename}>{selected.filename}</h2></div>
             </div>
             <div className="inspector-actions">
-              <button className="primary-button" type="button" onClick={() => chooseFile(selected.source_id)} disabled={!canUpload || uploading || selected.state !== 'active'}>
+              <button className="primary-button" type="button" onClick={() => chooseFile(selected.source_id)} disabled={!canUpload || uploading || lifecycleBusy || selected.state !== 'active'}>
                 <Icon name={uploading ? 'clock' : 'plus'} size={15} />{uploading ? '正在导入…' : '上传新修订'}
               </button>
-              {canRetry && <button className="secondary-button" type="button" onClick={() => void retryIndexing()} disabled={retrying}>
+              {canRetry && <button className="secondary-button" type="button" onClick={() => void retryIndexing()} disabled={retrying || lifecycleBusy}>
                 <Icon name="retry" size={15} />{retrying ? '正在排队…' : '重试索引'}
               </button>}
             </div>
+            <SourceLifecyclePanel source={selected} disabled={!canUpload || uploading || retrying || detailLoading || Boolean(detailError)} onBusyChange={lifecycleBusyChanged} onChanged={lifecycleChanged} onConflict={() => {
+              if (selectedIdRef.current) void refreshDetail(selectedIdRef.current, detailLifecycleControllerRef.current?.signal)
+              void refreshList(undefined, false)
+            }} />
             {detailError && <p className="detail-refresh-error" role="status">详情刷新失败：{detailError}</p>}
             <div className="inspector-section-heading"><span>修订状态</span><span className="revision-counter">{selected.latest_revision_id ? '最近上传与当前索引' : '等待导入'}</span></div>
             <div className="revision-stack">

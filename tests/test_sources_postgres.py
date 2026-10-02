@@ -11,7 +11,7 @@ import unittest
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from knowgrain.api import create_app
 from knowgrain.config import Settings
@@ -182,6 +182,7 @@ class PostgresSourcesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["revision_status"], "queued")
         self.assertEqual(snapshot["latest_revision"]["state"], "queued")
         self.assertEqual(snapshot["current_revision"]["index_state"], "ready")
+        self.assertEqual(snapshot["lifecycle_version"], 0)
         self.assertEqual(
             set(snapshot),
             {
@@ -189,6 +190,7 @@ class PostgresSourcesTests(unittest.IsolatedAsyncioTestCase):
                 "source_id",
                 "filename",
                 "state",
+                "lifecycle_version",
                 "latest_revision_id",
                 "current_revision_id",
                 "revision_status",
@@ -231,6 +233,27 @@ class PostgresSourcesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.repository.retry_source(result.source_id), result.job_id)
         self.assertEqual(self.vault.read_bytes(result.vault_path), content)
 
+    async def test_list_sources_filters_before_pagination(self):
+        first = await self.upload(filename="filter-one.txt", content=b"filter one")
+        second = await self.upload(filename="filter-two.txt", content=b"filter two")
+        active = await self.upload(filename="filter-active.txt", content=b"filter active")
+        for result in (first, second):
+            await self.repository.soft_delete_source(
+                result.source_id,
+                expected_lifecycle_version=0,
+                expected_latest_revision_id=result.revision_id,
+            )
+
+        deleted = await self.repository.list_sources(state="deleted", limit=500)
+        active_sources = await self.repository.list_sources(state="active", limit=500)
+        first_page = await self.repository.list_sources(state="deleted", limit=1, offset=0)
+        second_page = await self.repository.list_sources(state="deleted", limit=1, offset=1)
+        self.assertEqual(len(deleted), 2)
+        self.assertEqual(first_page + second_page, deleted)
+        self.assertEqual({item["source_id"] for item in active_sources}, {str(active.source_id)})
+        with self.assertRaises(ValueError):
+            await self.repository.list_sources(state="archived")
+
     async def test_same_parse_reindex_preserves_evidence_timestamp(self):
         result = await self.upload(filename="stable.txt", content=b"Stable original")
         digest = hashlib.sha256(b"Stable original").hexdigest()
@@ -246,6 +269,139 @@ class PostgresSourcesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["indexed_at"], first["indexed_at"])
         self.assertEqual(second["parsed_text_sha256"], first["parsed_text_sha256"])
         self.assertEqual(second["state"], "ready")
+
+    async def test_delete_restore_are_versioned_idempotent_and_aba_safe(self):
+        result = await self.upload(filename="lifecycle.txt", content=b"Lifecycle source")
+        owner = uuid4()
+        await self.repository.claim_job(owner)
+        digest = hashlib.sha256(b"parsed source").hexdigest()
+        self.assertTrue(await self.repository.complete_job(result.job_id, owner, digest, []))
+
+        deleted = await self.repository.soft_delete_source(
+            result.source_id,
+            expected_lifecycle_version=0,
+            expected_latest_revision_id=result.revision_id,
+        )
+        self.assertEqual((deleted["state"], deleted["lifecycle_version"]), ("deleted", 1))
+        self.assertEqual(deleted["current_revision_id"], str(result.revision_id))
+        self.assertEqual(
+            await self.repository.soft_delete_source(
+                result.source_id,
+                expected_lifecycle_version=0,
+                expected_latest_revision_id=result.revision_id,
+            ),
+            deleted,
+        )
+
+        restored = await self.repository.restore_source(
+            result.source_id,
+            expected_lifecycle_version=1,
+            expected_latest_revision_id=result.revision_id,
+            verified_current_revision_id=result.revision_id,
+        )
+        self.assertEqual((restored["state"], restored["lifecycle_version"]), ("active", 2))
+        self.assertEqual(
+            await self.repository.restore_source(
+                result.source_id,
+                expected_lifecycle_version=1,
+                expected_latest_revision_id=result.revision_id,
+                verified_current_revision_id=result.revision_id,
+            ),
+            restored,
+        )
+        with self.assertRaises(SourceConflictError):
+            await self.repository.soft_delete_source(
+                result.source_id,
+                expected_lifecycle_version=0,
+                expected_latest_revision_id=result.revision_id,
+            )
+
+    async def test_lifecycle_latest_revision_compare_and_set_rejects_new_upload(self):
+        first = await self.upload(filename="first.txt", content=b"first")
+        second = await self.upload(
+            filename="second.txt", content=b"second", source_id=first.source_id
+        )
+        with self.assertRaises(SourceConflictError):
+            await self.repository.soft_delete_source(
+                first.source_id,
+                expected_lifecycle_version=0,
+                expected_latest_revision_id=first.revision_id,
+            )
+        snapshot = await self.repository.get_source(first.source_id)
+        self.assertEqual(snapshot["latest_revision_id"], str(second.revision_id))
+        self.assertEqual(snapshot["lifecycle_version"], 0)
+
+    async def test_deleted_source_cancels_running_index_job_and_rejects_late_worker(self):
+        result = await self.upload(content=b"running source")
+        owner = uuid4()
+        await self.repository.claim_job(owner)
+        deleted = await self.repository.soft_delete_source(
+            result.source_id,
+            expected_lifecycle_version=0,
+            expected_latest_revision_id=result.revision_id,
+        )
+        self.assertEqual(deleted["lifecycle_version"], 1)
+        job = await self.repository.get_job(result.job_id)
+        revision = await self.repository.get_revision(result.revision_id)
+        self.assertEqual(job["state"], "failed")
+        self.assertIsNone(job["lease_owner"])
+        self.assertIsNone(job["lease_until"])
+        self.assertEqual(revision["state"], "failed")
+        self.assertIsNone(await self.repository.claim_job(uuid4()))
+        self.assertFalse(
+            await self.repository.complete_job(result.job_id, owner, "c" * 64, [])
+        )
+        self.assertFalse(await self.repository.fail_job(result.job_id, owner, "late error"))
+        self.assertFalse(await self.repository.renew_lease(result.job_id, owner))
+
+    async def test_expired_lease_cannot_be_renewed(self):
+        result = await self.upload(content=b"expired lease")
+        owner = uuid4()
+        await self.repository.claim_job(owner)
+        async with self.database.session_factory() as session, session.begin():
+            await session.execute(
+                update(Job)
+                .where(Job.id == result.job_id)
+                .values(lease_until=func.clock_timestamp() - text("INTERVAL '1 second'"))
+            )
+        self.assertFalse(await self.repository.renew_lease(result.job_id, owner))
+
+    async def test_lease_expiring_while_waiting_for_source_lock_cannot_complete(self):
+        result = await self.upload(content=b"wait for source lock")
+        owner = uuid4()
+        await self.repository.claim_job(owner)
+        async with self.database.session_factory() as session, session.begin():
+            await session.scalar(
+                select(SourceDocument)
+                .where(SourceDocument.id == result.source_id)
+                .with_for_update()
+            )
+            await session.execute(
+                update(Job)
+                .where(Job.id == result.job_id)
+                .values(lease_until=func.clock_timestamp() + text("INTERVAL '200 milliseconds'"))
+            )
+            completion = asyncio.create_task(
+                self.repository.complete_job(result.job_id, owner, "d" * 64, [])
+            )
+            await asyncio.sleep(0.35)
+            self.assertFalse(completion.done())
+        self.assertFalse(await completion)
+
+    async def test_release_owner_does_not_resurrect_deleted_running_work(self):
+        result = await self.upload(content=b"release deleted work")
+        owner = uuid4()
+        await self.repository.claim_job(owner)
+        await self.repository.soft_delete_source(
+            result.source_id,
+            expected_lifecycle_version=0,
+            expected_latest_revision_id=result.revision_id,
+        )
+        await self.repository.release_owner(owner)
+        job = await self.repository.get_job(result.job_id)
+        revision = await self.repository.get_revision(result.revision_id)
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(revision["state"], "failed")
 
     async def test_upload_api_persists_job_even_when_models_unavailable(self):
         app = create_app(self.settings)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import re
 import secrets
 import stat
 from collections.abc import Sequence
@@ -12,16 +13,18 @@ from pathlib import Path
 from uuid import UUID
 
 from knowgrain.generation_contract import DraftValidationError, render_evidence
+from knowgrain.config import MAX_UPLOAD_BYTES
 from knowgrain.m3_types import Evidence
 from knowgrain.vault import VaultPathError, VaultStore
 
 
-_MAX_ORIGINAL_BYTES = 64 * 1024 * 1024
+_MAX_ORIGINAL_BYTES = MAX_UPLOAD_BYTES
 _MAX_MARKDOWN_BYTES = 2 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EvidenceFileError(RuntimeError):
@@ -64,6 +67,15 @@ class EvidenceAccess:
         if digest != evidence.source_sha256:
             raise EvidenceFileError("conflict")
         return captured, evidence.filename
+
+    def original_revision(self, relative: str, expected_sha256: str) -> bytes:
+        """Read a bounded Vault file and verify it matches a retained revision."""
+        if not isinstance(expected_sha256, str) or not _SHA256_PATTERN.fullmatch(expected_sha256):
+            raise EvidenceFileError("unavailable")
+        captured, digest = self._capture(relative, _MAX_ORIGINAL_BYTES)
+        if digest != expected_sha256:
+            raise EvidenceFileError("conflict")
+        return captured
 
     def markdown(self, evidence: Evidence) -> bytes:
         relative, expected = self._canonical_markdown(evidence)

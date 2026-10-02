@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Awaitable, Callable
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -122,11 +122,15 @@ class SourceRepository:
             await session.flush()
             return ImportResult(source_id, revision_id, job_id, False, vault_path)
 
-    async def list_sources(self, *, limit: int = 100, offset: int = 0) -> list[dict]:
+    async def list_sources(
+        self, *, limit: int = 100, offset: int = 0, state: str = "all"
+    ) -> list[dict]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("offset must be zero or greater")
+        if state not in {"all", "active", "deleted"}:
+            raise ValueError("state must be 'all', 'active', or 'deleted'")
 
         latest_revision = aliased(SourceRevision, name="latest_revision")
         current_revision = aliased(SourceRevision, name="current_revision")
@@ -145,6 +149,8 @@ class SourceRepository:
                 .limit(limit)
                 .offset(offset)
             )
+            if state != "all":
+                statement = statement.where(SourceDocument.state == state)
             rows = (await session.execute(statement)).all()
             return [
                 self._source_snapshot_for_revisions(source, latest, current)
@@ -156,6 +162,111 @@ class SourceRepository:
             source = await session.get(SourceDocument, source_id)
             if source is None:
                 return None
+            return await self._source_snapshot(session, source)
+
+    async def soft_delete_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        expected_lifecycle_version: int,
+        expected_latest_revision_id: uuid.UUID | None,
+    ) -> dict:
+        self._validate_expected_lifecycle_version(expected_lifecycle_version)
+        async with self.database.session_factory() as session, session.begin():
+            source = await session.scalar(
+                select(SourceDocument)
+                .where(SourceDocument.id == source_id)
+                .with_for_update()
+            )
+            if source is None:
+                raise SourceNotFoundError(f"Source {source_id} does not exist")
+
+            if (
+                source.state == "deleted"
+                and source.lifecycle_version == expected_lifecycle_version + 1
+                and source.latest_revision_id == expected_latest_revision_id
+            ):
+                return await self._source_snapshot(session, source)
+            if (
+                source.state != "active"
+                or source.lifecycle_version != expected_lifecycle_version
+                or source.latest_revision_id != expected_latest_revision_id
+            ):
+                raise SourceConflictError("Source changed; refresh before deleting")
+
+            jobs = list(
+                (
+                    await session.scalars(
+                        select(Job)
+                        .join(SourceRevision, SourceRevision.id == Job.revision_id)
+                        .where(SourceRevision.source_id == source.id)
+                        .order_by(Job.id)
+                        .with_for_update(of=Job)
+                    )
+                ).all()
+            )
+            revisions = list(
+                (
+                    await session.scalars(
+                        select(SourceRevision)
+                        .where(SourceRevision.source_id == source.id)
+                        .order_by(SourceRevision.id)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            now = await self._database_now(session)
+            for job in jobs:
+                if job.state in {"queued", "running"}:
+                    job.state = "failed"
+                    job.lease_owner = None
+                    job.lease_until = None
+                    job.error = "Source deleted"
+                    job.updated_at = now
+            for revision in revisions:
+                if revision.index_state in {"queued", "indexing"}:
+                    revision.index_state = "failed"
+                    revision.error = "Source deleted"
+            source.state = "deleted"
+            source.lifecycle_version += 1
+            await session.flush()
+            return await self._source_snapshot(session, source)
+
+    async def restore_source(
+        self,
+        source_id: uuid.UUID,
+        *,
+        expected_lifecycle_version: int,
+        expected_latest_revision_id: uuid.UUID | None,
+        verified_current_revision_id: uuid.UUID | None,
+    ) -> dict:
+        self._validate_expected_lifecycle_version(expected_lifecycle_version)
+        async with self.database.session_factory() as session, session.begin():
+            source = await session.scalar(
+                select(SourceDocument)
+                .where(SourceDocument.id == source_id)
+                .with_for_update()
+            )
+            if source is None:
+                raise SourceNotFoundError(f"Source {source_id} does not exist")
+
+            if (
+                source.state == "active"
+                and source.lifecycle_version == expected_lifecycle_version + 1
+                and source.latest_revision_id == expected_latest_revision_id
+                and source.current_revision_id == verified_current_revision_id
+            ):
+                return await self._source_snapshot(session, source)
+            if (
+                source.state != "deleted"
+                or source.lifecycle_version != expected_lifecycle_version
+                or source.latest_revision_id != expected_latest_revision_id
+                or source.current_revision_id != verified_current_revision_id
+            ):
+                raise SourceConflictError("Source changed; refresh before restoring")
+            source.state = "active"
+            source.lifecycle_version += 1
+            await session.flush()
             return await self._source_snapshot(session, source)
 
     async def get_revision(self, revision_id: uuid.UUID) -> dict | None:
@@ -204,7 +315,11 @@ class SourceRepository:
             job.lease_until = None
             job.error = None
             job.updated_at = now
-            revision = await session.get(SourceRevision, source.latest_revision_id)
+            revision = await session.scalar(
+                select(SourceRevision)
+                .where(SourceRevision.id == source.latest_revision_id)
+                .with_for_update()
+            )
             if revision is None:
                 raise SourceConflictError("Latest revision record is missing")
             revision.index_state = "queued"
@@ -212,25 +327,43 @@ class SourceRepository:
             return job.id
 
     async def claim_job(self, owner: uuid.UUID) -> dict | None:
-        now = datetime.now(UTC)
         async with self.database.session_factory() as session, session.begin():
             statement = (
-                select(Job)
+                select(SourceDocument, Job.id)
+                .join(SourceRevision, SourceRevision.source_id == SourceDocument.id)
+                .join(Job, Job.revision_id == SourceRevision.id)
                 .where(
+                    SourceDocument.state == "active",
                     or_(
                         Job.state == "queued",
                         and_(
                             Job.state == "running",
-                            or_(Job.lease_until.is_(None), Job.lease_until <= now),
+                            or_(Job.lease_until.is_(None), Job.lease_until <= func.clock_timestamp()),
                         ),
-                    )
+                    ),
                 )
-                .order_by(Job.created_at, Job.id)
-                .with_for_update(skip_locked=True)
+                .order_by(Job.created_at, Job.id, SourceDocument.id)
+                .with_for_update(of=SourceDocument, skip_locked=True)
                 .limit(1)
             )
-            job = await session.scalar(statement)
+            candidate = (await session.execute(statement)).first()
+            if candidate is None:
+                return None
+            source, job_id = candidate
+            job = await session.scalar(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
             if job is None:
+                return None
+            revision = await session.scalar(
+                select(SourceRevision)
+                .where(SourceRevision.id == job.revision_id)
+                .with_for_update()
+            )
+            if revision is None:
+                raise SourceConflictError("Index job references a missing revision")
+            now = await self._database_now(session)
+            if source.state != "active" or not self._is_claimable(job, now):
                 return None
             job.state = "running"
             job.lease_owner = owner
@@ -238,14 +371,8 @@ class SourceRepository:
             job.attempts += 1
             job.error = None
             job.updated_at = now
-            revision = await session.get(SourceRevision, job.revision_id)
-            if revision is None:
-                raise SourceConflictError("Index job references a missing revision")
             revision.index_state = "indexing"
             revision.error = None
-            source = await session.get(SourceDocument, revision.source_id)
-            if source is None:
-                raise SourceConflictError("Index revision references a missing source")
             await session.flush()
             return {
                 "job_id": str(job.id),
@@ -257,14 +384,17 @@ class SourceRepository:
             }
 
     async def renew_lease(self, job_id: uuid.UUID, owner: uuid.UUID) -> bool:
-        now = datetime.now(UTC)
         async with self.database.session_factory() as session, session.begin():
-            result = await session.execute(
-                update(Job)
-                .where(Job.id == job_id, Job.state == "running", Job.lease_owner == owner)
-                .values(lease_until=now + _LEASE_DURATION, updated_at=now)
-            )
-            return result.rowcount == 1
+            context = await self._lock_job_context(session, job_id)
+            if context is None:
+                return False
+            source, job, _revision = context
+            now = await self._database_now(session)
+            if not self._has_live_lease(source, job, owner, now):
+                return False
+            job.lease_until = now + _LEASE_DURATION
+            job.updated_at = now
+            return True
 
     async def complete_job(
         self,
@@ -275,41 +405,14 @@ class SourceRepository:
     ) -> bool:
         if not _SHA256_PATTERN.fullmatch(text_sha256):
             raise ValueError("text_sha256 must be a lowercase hexadecimal SHA-256 digest")
-        now = datetime.now(UTC)
         async with self.database.session_factory() as session, session.begin():
-            source_id = await session.scalar(
-                select(SourceRevision.source_id)
-                .join(Job, Job.revision_id == SourceRevision.id)
-                .where(Job.id == job_id)
-            )
-            if source_id is None:
+            context = await self._lock_job_context(session, job_id)
+            if context is None:
                 return False
-            source = await session.scalar(
-                select(SourceDocument)
-                .where(SourceDocument.id == source_id)
-                .with_for_update()
-            )
-            if source is None:
-                raise SourceConflictError("Index revision references a missing source")
-            job = await session.scalar(
-                select(Job)
-                .where(
-                    Job.id == job_id,
-                    Job.state == "running",
-                    Job.lease_owner == owner,
-                    Job.lease_until > now,
-                )
-                .with_for_update()
-            )
-            if job is None:
+            source, job, revision = context
+            now = await self._database_now(session)
+            if not self._has_live_lease(source, job, owner, now):
                 return False
-            revision = await session.scalar(
-                select(SourceRevision)
-                .where(SourceRevision.id == job.revision_id)
-                .with_for_update()
-            )
-            if revision is None:
-                raise SourceConflictError("Index job references a missing revision")
             if revision.source_id != source.id:
                 raise SourceConflictError("Index job revision changed source unexpectedly")
             # This timestamp belongs to the immutable content/parse snapshot.
@@ -332,28 +435,15 @@ class SourceRepository:
             return True
 
     async def fail_job(self, job_id: uuid.UUID, owner: uuid.UUID, error: str) -> bool:
-        now = datetime.now(UTC)
         bounded_error = (error or "Indexing failed")[:_MAX_ERROR_LENGTH]
         async with self.database.session_factory() as session, session.begin():
-            job = await session.scalar(
-                select(Job)
-                .where(
-                    Job.id == job_id,
-                    Job.state == "running",
-                    Job.lease_owner == owner,
-                    Job.lease_until > now,
-                )
-                .with_for_update()
-            )
-            if job is None:
+            context = await self._lock_job_context(session, job_id)
+            if context is None:
                 return False
-            revision = await session.scalar(
-                select(SourceRevision)
-                .where(SourceRevision.id == job.revision_id)
-                .with_for_update()
-            )
-            if revision is None:
-                raise SourceConflictError("Index job references a missing revision")
+            source, job, revision = context
+            now = await self._database_now(session)
+            if not self._has_live_lease(source, job, owner, now):
+                return False
             revision.index_state = "failed"
             revision.error = bounded_error
             job.state = "failed"
@@ -364,42 +454,134 @@ class SourceRepository:
             return True
 
     async def release_owner(self, owner: uuid.UUID) -> None:
-        now = datetime.now(UTC)
         async with self.database.session_factory() as session, session.begin():
-            owned_jobs = list(
+            source_ids = list(
                 (
                     await session.scalars(
-                        select(Job)
+                        select(SourceDocument.id)
+                        .join(SourceRevision, SourceRevision.source_id == SourceDocument.id)
+                        .join(Job, Job.revision_id == SourceRevision.id)
                         .where(Job.state == "running", Job.lease_owner == owner)
-                        .with_for_update()
+                        .distinct()
+                        .order_by(SourceDocument.id)
                     )
                 ).all()
             )
-            if not owned_jobs:
-                return
-            job_ids = [job.id for job in owned_jobs]
-            revision_ids = [job.revision_id for job in owned_jobs]
-            await session.execute(
-                update(Job)
-                .where(Job.id.in_(job_ids))
-                .values(
-                    state="queued",
-                    lease_owner=None,
-                    lease_until=None,
-                    error=None,
-                    updated_at=now,
+            for source_id in source_ids:
+                source = await session.scalar(
+                    select(SourceDocument)
+                    .where(SourceDocument.id == source_id)
+                    .with_for_update()
                 )
-            )
-            if revision_ids:
-                await session.execute(
-                    update(SourceRevision)
-                    .where(SourceRevision.id.in_(revision_ids), SourceRevision.index_state == "indexing")
-                    .values(index_state="queued", error=None)
+                if source is None:
+                    continue
+                jobs = list(
+                    (
+                        await session.scalars(
+                            select(Job)
+                            .join(SourceRevision, SourceRevision.id == Job.revision_id)
+                            .where(
+                                SourceRevision.source_id == source.id,
+                                Job.state == "running",
+                                Job.lease_owner == owner,
+                            )
+                            .order_by(Job.id)
+                            .with_for_update(of=Job)
+                        )
+                    ).all()
                 )
+                revisions = list(
+                    (
+                        await session.scalars(
+                            select(SourceRevision)
+                            .where(SourceRevision.id.in_([job.revision_id for job in jobs]))
+                            .order_by(SourceRevision.id)
+                            .with_for_update()
+                        )
+                    ).all()
+                ) if jobs else []
+                now = await self._database_now(session)
+                deleted = source.state != "active"
+                revision_by_id = {revision.id: revision for revision in revisions}
+                for job in jobs:
+                    job.state = "failed" if deleted else "queued"
+                    job.lease_owner = None
+                    job.lease_until = None
+                    job.error = "Source deleted" if deleted else None
+                    job.updated_at = now
+                    revision = revision_by_id.get(job.revision_id)
+                    if revision is not None and revision.index_state == "indexing":
+                        revision.index_state = "failed" if deleted else "queued"
+                        revision.error = "Source deleted" if deleted else None
 
     async def _lock_hash(self, session: AsyncSession, sha256: str) -> None:
         lock_key = int.from_bytes(hashlib.sha256(sha256.encode("ascii")).digest()[:8], "big", signed=True)
         await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+
+    async def _lock_job_context(
+        self, session: AsyncSession, job_id: uuid.UUID
+    ) -> tuple[SourceDocument, Job, SourceRevision] | None:
+        identity = await session.execute(
+            select(SourceRevision.source_id, Job.revision_id)
+            .join(Job, Job.revision_id == SourceRevision.id)
+            .where(Job.id == job_id)
+        )
+        row = identity.first()
+        if row is None:
+            return None
+        source_id, revision_id = row
+        source = await session.scalar(
+            select(SourceDocument)
+            .where(SourceDocument.id == source_id)
+            .with_for_update()
+        )
+        if source is None:
+            raise SourceConflictError("Index revision references a missing source")
+        job = await session.scalar(
+            select(Job).where(Job.id == job_id).with_for_update()
+        )
+        if job is None:
+            return None
+        revision = await session.scalar(
+            select(SourceRevision)
+            .where(SourceRevision.id == revision_id)
+            .with_for_update()
+        )
+        if revision is None:
+            raise SourceConflictError("Index job references a missing revision")
+        if job.revision_id != revision.id or revision.source_id != source.id:
+            raise SourceConflictError("Index job revision changed source unexpectedly")
+        return source, job, revision
+
+    @staticmethod
+    async def _database_now(session: AsyncSession) -> datetime:
+        value = await session.scalar(select(func.clock_timestamp()))
+        if value is None:
+            raise RuntimeError("PostgreSQL did not return the database clock")
+        return value
+
+    @staticmethod
+    def _validate_expected_lifecycle_version(value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("expected_lifecycle_version must be a nonnegative integer")
+
+    @staticmethod
+    def _is_claimable(job: Job, now: datetime) -> bool:
+        return job.state == "queued" or (
+            job.state == "running" and (job.lease_until is None or job.lease_until <= now)
+        )
+
+    @staticmethod
+    def _has_live_lease(
+        source: SourceDocument, job: Job, owner: uuid.UUID, now: datetime
+    ) -> bool:
+        return (
+            source.state == "active"
+            and job.state == "running"
+            and job.lease_owner == owner
+            and job.lease_until is not None
+            and job.lease_until > now
+        )
 
     async def _find_active_hash(
         self, session: AsyncSession, sha256: str
@@ -452,6 +634,7 @@ class SourceRepository:
             "source_id": str(source.id),
             "filename": source.filename,
             "state": source.state,
+            "lifecycle_version": source.lifecycle_version,
             "latest_revision_id": str(source.latest_revision_id)
             if source.latest_revision_id is not None
             else None,

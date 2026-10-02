@@ -49,6 +49,9 @@ class SourceDocument(Base):
     __tablename__ = "source_document"
     __table_args__ = (
         CheckConstraint("state IN ('active', 'deleted')", name="ck_source_document_state"),
+        CheckConstraint(
+            "lifecycle_version >= 0", name="ck_source_document_lifecycle_version_nonnegative"
+        ),
         ForeignKeyConstraint(
             ["latest_revision_id", "id"],
             ["source_revision.id", "source_revision.source_id"],
@@ -67,6 +70,9 @@ class SourceDocument(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename: Mapped[str] = mapped_column(String(1024), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    lifecycle_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     latest_revision_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     current_revision_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(

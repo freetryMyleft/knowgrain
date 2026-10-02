@@ -6,6 +6,7 @@ import logging
 from uuid import UUID, uuid4
 
 from knowgrain.database import ApplicationDatabase
+from knowgrain.evidence_access import EvidenceAccess, EvidenceFileError
 from knowgrain.lightrag_runtime import LightRAGRuntime
 from knowgrain.parsers import DocumentParseError, parse_document
 from knowgrain.source_repository import SourceRepository
@@ -112,10 +113,13 @@ class IndexJobRunner:
                 raise JobLeaseLostError("Job lease was lost")
 
     async def _index(self, job: dict) -> None:
-        content = await asyncio.to_thread(self.vault.read_bytes, job["vault_path"])
-        if hashlib.sha256(content).hexdigest() != job["sha256"]:
-            raise SourceChangedError("Vault 原件与已登记修订哈希不一致；原件未被覆盖")
-        parsed = await asyncio.to_thread(parse_document, job["filename"], content)
+        try:
+            content = await self._thread_drained(
+                EvidenceAccess(self.vault).original_revision, job["vault_path"], job["sha256"]
+            )
+        except EvidenceFileError:
+            raise SourceChangedError("Vault 原件缺失、无法安全读取或与修订哈希不一致；请检查原件后重试") from None
+        parsed = await self._thread_drained(parse_document, job["filename"], content)
         await self.lightrag.index_text(
             source_id=str(job["revision_id"]), text=parsed.text, file_path=job["vault_path"]
         )
@@ -127,3 +131,27 @@ class IndexJobRunner:
         )
         if not completed:
             raise JobLeaseLostError("Job lease was lost before completion")
+
+    @staticmethod
+    async def _thread_drained(function, *args):
+        """Keep file/parse workers owned until completion, including cancellation."""
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                if not task.done():
+                    continue
+                with suppress(Exception, asyncio.CancelledError):
+                    task.result()
+                raise
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+            else:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result

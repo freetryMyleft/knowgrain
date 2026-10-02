@@ -3,6 +3,8 @@ import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import threading
+from unittest.mock import patch
 from uuid import uuid4
 
 from knowgrain.job_runner import IndexJobRunner, JobLeaseLostError
@@ -126,3 +128,46 @@ class IndexPipelineTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertTrue(model.cancelled)
         self.assertIsNone(self.repository.completion)
+
+    async def test_cancellation_joins_file_worker_before_shutdown_returns(self):
+        job = self.job(b"evidence")
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def delayed_read(*args):
+            started.set()
+            release.wait(5)
+            finished.set()
+            return b"evidence"
+
+        model = ModelStub()
+        with patch("knowgrain.job_runner.EvidenceAccess.original_revision", side_effect=delayed_read):
+            task = asyncio.create_task(self.runner(model)._execute(job))
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                task.cancel()
+                await asyncio.sleep(0.02)
+                self.assertFalse(task.done())
+                task.cancel()  # Repeated shutdown signals must not detach the worker.
+                await asyncio.sleep(0.02)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(finished.is_set())
+        self.assertFalse(model.calls)
+        self.assertIsNone(self.repository.completion)
+
+    async def test_symlink_original_is_rejected_before_model_call(self):
+        job = self.job(b"evidence")
+        original = self.vault.resolve(job["vault_path"])
+        replacement = original.with_name("outside.txt")
+        replacement.write_bytes(b"evidence")
+        original.unlink()
+        original.symlink_to(replacement)
+        model = ModelStub()
+        await self.runner(model)._execute(job)
+        self.assertFalse(model.calls)
+        self.assertIn("安全读取", self.repository.failure)

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 import logging
 from pathlib import Path
 from uuid import UUID
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Query, status
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ from knowgrain.provenance import ProvenanceService
 from knowgrain.provenance_repository import ProvenanceRepository
 from knowgrain.source_repository import SourceRepository, SourceConflictError, SourceNotFoundError
 from knowgrain.source_service import SourceService, InvalidUploadError
+from knowgrain.source_lifecycle_api import install_source_lifecycle_routes
 from knowgrain.vault import VaultStore
 from knowgrain.vault_setup import (
     VaultDatabaseUnavailable,
@@ -399,6 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_generation_routes(app)
     install_query_routes(app)
     install_entity_mapping_routes(app)
+    install_source_lifecycle_routes(app)
 
     @app.middleware("http")
     async def validate_write_origin(request: Request, call_next):
@@ -525,8 +528,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
+        state: Literal["all", "active", "deleted"] = Query(default="all"),
     ):
-        return await source_runtime(request).repository.list_sources(limit=limit, offset=offset)
+        return await source_runtime(request).repository.list_sources(limit=limit, offset=offset, state=state)
 
     @app.get("/api/v1/sources/{source_id}", tags=["sources"])
     async def get_source(request: Request, source_id: UUID):
