@@ -4,7 +4,7 @@
 
 ## 当前可运行范围
 
-当前已有 LightRAG CLI、常驻 FastAPI、资料上传/修订 API、Vault 原件存储、Markdown/TXT/PDF/DOCX 解析和 PostgreSQL 索引任务。`apps/web` 提供连接真实 API 的资料与 Wiki 页面：支持导入、上传新修订、状态查看、失败重试、手动创建 Markdown、编辑预览、内部链接、反链和外部编辑冲突。模型生成 Wiki、审阅和问答尚未实现，`design/ui-concepts.html` 是早期界面草图。
+当前已有 LightRAG CLI、常驻 FastAPI、资料上传/修订 API、Vault 原件存储、Markdown/TXT/PDF/DOCX 解析和 PostgreSQL 索引任务。`apps/web` 提供连接真实 API 的资料、Wiki 和问答页面：支持导入、上传新修订、状态查看、失败重试、Markdown 编辑、内部链接、反链、外部编辑冲突、有证据的 Wiki 生成、明确审阅和提案应用。问答保存逐条引用与来源修订，证据侧栏提供准确原件及 Markdown 摘录。图谱页面绑定、恢复/发布和第三方模型配置仍在开发；`design/ui-concepts.html` 是早期界面草图。
 
 资料层已通过单元测试和隔离 PostgreSQL 集成测试；真实本地 Ollama 与 pgvector 的 `ainsert → aquery_data`、Web 上传和修订索引已验证。此次使用隔离 PostgreSQL 16.14，Compose PostgreSQL 18 与远端 CI 尚未执行。证据见 [`本地验收记录`](docs/verification/m0-m1-local-2026-09-30.md)，完整里程碑状态见 [`docs/development-status.md`](docs/development-status.md)。
 
@@ -68,7 +68,7 @@ Compose 使用 PostgreSQL 18，数据卷挂载到 `/var/lib/postgresql`，遵循
 
 ## 导入资料与查看任务
 
-先执行 `make migrate`（当前迁移为 `0007_m3_review`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
+先执行 `make migrate`（当前迁移为 `0008_m4_queries`）。`.env` 中的 `VAULT_ROOT` 提供首次初始化位置，默认 `./data/vault`。启动 API 会创建 `Sources/Files/`、`Sources/Evidence/`、`Wiki/Drafts/` 和 `Wiki/Pages/`，保留已有文件及 `.obsidian`。可用 Obsidian 打开同一目录。
 
 Web 顶部的 **Vault 设置** 可以预览和选择 `VAULT_PARENT_DIR` 下的一个文件夹（默认父目录 `./data/vaults`）。只输入文件夹名称，先查看哪些目录已存在、哪些将创建，再点击“使用此 Vault”。预览不写入文件；选择结果保存到应用数据库，重启时使用该绑定，后续改 `VAULT_ROOT` 不会覆盖选择。已有资料或 Wiki 后位置锁定，不能通过设置移动资料；后续迁移/恢复需专门流程。
 
@@ -103,7 +103,7 @@ curl -X POST http://127.0.0.1:8787/api/v1/sources/SOURCE_ID/reindex
 
 ## Wiki 浏览与编辑
 
-在资料页点击 **Wiki**，使用 **新建** 创建手动草稿。文件写入 `Wiki/Drafts/{kg_id}.md`，frontmatter 保存稳定的 `kg_id`、`kg_kind: wiki` 和 `kg_status`。编辑器可直接修改完整 Markdown，预览不显示 frontmatter。保存必须带读取时的 SHA-256；修改页面身份或状态会被拒绝，审阅流程属于 M3。
+在资料页点击 **Wiki**，使用 **新建** 创建手动草稿。文件写入 `Wiki/Drafts/{kg_id}.md`，frontmatter 保存稳定的 `kg_id`、`kg_kind: wiki` 和 `kg_status`。编辑器可直接修改完整 Markdown，预览不显示 frontmatter。保存必须带读取时的 SHA-256；修改页面身份或状态会被拒绝，生成草稿的审阅使用下述明确审阅入口。
 
 页面链接使用 `[[标题]]`、`[[路径#标题|显示文字]]` 或本页锚点；只有能唯一解析的页面才可点击跳转。反链显示来源页面、行号与锚点。代码、注释和转义链接不进入反链。外部编辑器改名或移动文件时保留 `kg_id`，并放在 `Wiki/Drafts/` 或 `Wiki/Pages/` 下，Web 会重新扫描定位；无身份、重复身份或损坏的页面显示扫描问题，扫描不会自动改写文件。
 
@@ -124,7 +124,21 @@ curl http://127.0.0.1:8787/api/v1/wiki/generation-jobs
 
 审阅 API 为 `POST /api/v1/wiki/pages/PAGE_ID/review`，请求 `{expected_sha256}`；应用提案为 `POST /api/v1/wiki/pages/PROPOSAL_ID/apply`，请求 `{expected_proposal_sha256, expected_target_sha256}`。页面、来源或目标发生变化返回 409；写入或数据库暂时故障返回 503。界面在网络/503 失败后保留原请求，提供 **继续上次操作**。若已重载浏览器，恢复时需复用原请求哈希：审阅使用清单中的 `generated_sha256`，提案使用其生成哈希和 `proposal_target_sha256`。服务端通过 `.knowgrain/review-operations/` 中的不可变日志恢复，只接受该操作的准确旧/新内容；不自动覆盖外部编辑。完整故障恢复界面仍属 M5 工作。
 
-本地 `qwen3.6:35b` 已通过真实 Core 检索与 Wiki 草稿生成验证，见 [模型切换验证](docs/verification/qwen36-local-2026-10-01.md)。M3 的 Web 审阅、提案应用、冲突保护、同请求重试和审阅状态重启恢复已本地验收，详见 [审阅验收记录](docs/verification/m3-review-2026-10-02.md)。生成正文的引用校验不等同于事实语义核实，审阅需要将声明与原文并列核对；M4–M6 与第三方模型适配仍在路线图中。
+本地 `qwen3.6:35b` 已通过真实 Core 检索与 Wiki 草稿生成验证，见 [模型切换验证](docs/verification/qwen36-local-2026-10-01.md)。M3 的 Web 审阅、提案应用、冲突保护、同请求重试和审阅状态重启恢复已本地验收，详见 [审阅验收记录](docs/verification/m3-review-2026-10-02.md)。生成正文的引用校验不等同于事实语义核实，审阅需要将声明与原文并列核对；M4 图谱绑定、M5–M6 与第三方模型适配仍在路线图中。
+
+## 有依据的问答
+
+在资料页点击 **问答**，输入问题后点击 **查阅资料**。本机任务会先检索并验证当前资料，再用配置的模型生成答案。记录保存到 PostgreSQL，离开页面或刷新后可重新打开。每条声明旁的引用和 Wiki 中的 `Sources/Evidence/UUID` 链接都能打开原文侧栏，展示准确修订、完整哈希、可获得的位置和索引时间。
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"question":"根据已导入资料，这个项目的原件保存在哪里？"}' http://127.0.0.1:8787/api/v1/queries
+curl http://127.0.0.1:8787/api/v1/queries
+curl http://127.0.0.1:8787/api/v1/queries/JOB_ID
+```
+
+POST 返回 202 和 `job_id`，不等待模型完成。失败任务可 `POST /api/v1/queries/JOB_ID/retry`；租约过期后执行器会重新领取未完成任务。无当前证据或模型判断资料不足时返回 **无法核实**，没有未引用的补充正文。历史答案重新读取时校验来源；过期证据有明确提示，不会进入新答案。
+
+`GET /api/v1/evidence/EVIDENCE_ID/original` 返回经过完整 SHA-256 检查的对应原件字节；`/markdown` 返回与保留清单一致的 Vault 摘录。缺失文件返回 404、内容变化返回 409、不安全路径或服务故障返回 503。浏览器不能传服务器文件路径。详见 [M4 问答契约](docs/m4-question-contract.md)。引用校验不能代替语义准确率评估；图谱页面绑定和 M5–M6 工作尚未完成。
 
 ## 开发验证
 

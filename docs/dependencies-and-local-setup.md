@@ -1,10 +1,10 @@
 # Knowgrain 依赖清单与本地安装建议
 
-状态：实施中（2026-10-01）。仓库已有依赖锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务、资料 Web 和手动 Wiki 编辑/预览/反链。真实 Ollama/pgvector 检索及上传索引通过本地验证，见 [Core/导入验收记录](verification/m0-m1-local-2026-09-30.md)。Web 的 Vault 绑定和重启恢复、Wiki 外部改名/编辑/409 冲突已验证，见 [Vault 验收记录](verification/m1-vault-setup-2026-09-30.md)及 [M2 验收记录](verification/m2-wiki-2026-10-01.md)。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。模型生成 Wiki、审阅、问答、完整安装向导和第三方模型配置尚未实现。本页区分当前运行步骤与后续依赖建议。
+状态：实施中（2026-10-02）。仓库已有锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务，以及真实 API 驱动的资料/Wiki/问答界面。主题生成、明确审阅、提案应用、逐条问答引用和证据导航已实现；当前运行默认使用 Ollama `qwen3.6:35b` 与 `qwen3-embedding:0.6b`。真实 Core/上传、Vault 绑定、Wiki 冲突和 M3 审阅见 [开发状态](development-status.md)中的验收记录。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。完整图谱页面绑定、安装向导、恢复/发布及第三方模型配置仍未完成。本页区分当前运行步骤与后续依赖建议。
 
 ## 1. 推荐组合
 
-首版推荐 **单个 Knowgrain Python 后端进程（内嵌 LightRAG Core 与作业执行器）+ PostgreSQL/pgvector + 本机 Ollama + 本机 Vault 文件夹**。Web 前端由后端提供静态构建产物；模型服务可在设置中切换为第三方 LLM/Embedding API。Obsidian 桌面应用只用于打开和编辑同一个 Vault，可不安装。
+首版推荐 **单个 Knowgrain Python 后端进程（内嵌 LightRAG Core 与作业执行器）+ PostgreSQL/pgvector + 本机 Ollama + 本机 Vault 文件夹**。Web 前端由后端提供静态构建产物；当前模型配置使用 Ollama，独立选择第三方 LLM/Embedding API 的适配层与设置页仍待开发。Obsidian 桌面应用只用于打开和编辑同一个 Vault，可不安装。
 
 | 类别 | 推荐内容 | 安装位置 | 必需性与用途 |
 | --- | --- | --- | --- |
@@ -81,7 +81,7 @@ ollama list
 1. 安装 Git、Docker Desktop、Python 3.12、`uv`、Node.js 22.12+（或 24 LTS）、Ollama。在 macOS 上可用各工具官方安装包；Obsidian 按需要安装。
 2. 用 `docker version`、`docker compose version`、`python3 --version`、`uv --version`、`node --version`、`npm --version` 检查工具可用。
 3. 在仓库根目录执行 `uv sync --locked` 安装当前 Python 依赖。
-4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0007_m3_review`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。
+4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0008_m4_queries`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。
 5. 在 `.env` 设置 `VAULT_ROOT`（默认 `./data/vault`），启动 Ollama 并执行 `make models` 下载示例模型，再运行 `make demo` 验证 LightRAG Core 的最小导入与结构化检索。`make api` 启动常驻进程；使用 `/docs` 或 README 的 curl 上传资料、查看修订/任务和重试。手动 Wiki 操作仅依赖应用数据库和 Vault；模型生成与第三方模型切换属于后续实现。
 
 当前可执行的开发启动命令如下；`docker compose` 要求 Docker Desktop 已启动，Ollama 也必须已启动：

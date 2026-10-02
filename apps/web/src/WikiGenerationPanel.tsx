@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import EvidencePanel from './EvidencePanel'
 import { isPageDetailFor } from './wiki-contract'
 import type { PageDetail } from './wiki-contract'
 import {
@@ -72,6 +73,7 @@ function evidenceLabel(item: EvidenceReference): string {
 }
 
 function ClaimEvidence({ claim, evidence, current }: { claim: DraftClaim; evidence: EvidenceReference[]; current: boolean }) {
+  const [selectedEvidence, setSelectedEvidence] = useState<string | null>(null)
   return <article className="generation-claim-row">
     <div className="generation-claim-copy">
       <span className="generation-claim-key mono">{claim.key}</span>
@@ -95,8 +97,10 @@ function ClaimEvidence({ claim, evidence, current }: { claim: DraftClaim; eviden
           <span>引文 SHA-256 <code title={item.excerpt_sha256}>{shortHash(item.excerpt_sha256)}</code></span>
           <span>索引于 {formatDate(item.indexed_at)}</span>
         </div>
+        <button type="button" className="quiet-button" onClick={() => setSelectedEvidence(item.evidence_id)}>打开原文证据 ↗</button>
       </article>)}
     </div>
+    {selectedEvidence && <EvidencePanel evidenceId={selectedEvidence} onClose={() => setSelectedEvidence(null)} />}
   </article>
 }
 

@@ -18,6 +18,8 @@ import {
 } from './wiki-contract'
 import type { Backlink, BacklinkResponse, ConflictDetail, PageDetail, PageListResponse, PageSummary, WikiIssue, WikiLink } from './wiki-contract'
 import WikiGenerationPanel from './WikiGenerationPanel'
+import EvidencePanel from './EvidencePanel'
+import { evidenceIdFromWikiTarget } from './question-contract'
 import './wiki.css'
 
 const API_ROOT = '/api/v1'
@@ -178,9 +180,10 @@ type PreviewProps = {
   onWikiNavigate: (link: WikiLink | null) => void
   onExternalNavigate: (href: string) => void
   onAnchor: (anchor: string) => void
+  onEvidence: (id: string) => void
 }
 
-function MarkdownPreview({ markdownText, links, onWikiNavigate, onExternalNavigate, onAnchor }: PreviewProps) {
+function MarkdownPreview({ markdownText, links, onWikiNavigate, onExternalNavigate, onAnchor, onEvidence }: PreviewProps) {
   const transformed = renderWikilinks(markdownText, links)
   const ids = transformed.targets
   const slugs = new Map<string, number>()
@@ -206,6 +209,8 @@ function MarkdownPreview({ markdownText, links, onWikiNavigate, onExternalNaviga
       if (href?.startsWith('knowgrain-wiki://')) {
         const rawId = Number(href.slice('knowgrain-wiki://'.length))
         const link = Number.isInteger(rawId) ? ids.get(rawId) ?? null : null
+        const evidenceId = link ? evidenceIdFromWikiTarget(link.target) : null
+        if (evidenceId) return <a href="#" className="wiki-link-resolved" onClick={event => { event.preventDefault(); onEvidence(evidenceId) }}>{children}</a>
         if (!link?.to_page_id) return <span className="wiki-link-unresolved" title={link ? `目标不可用：${link.target || '本页锚点'}` : '此 Wiki 链接格式暂不支持'}>{children}<small>未链接</small></span>
         return <a href="#" title={title} className="wiki-link-resolved" onClick={(event) => { event.preventDefault(); onWikiNavigate(link) }}>{children}</a>
       }
@@ -235,6 +240,7 @@ function targetElement(preview: HTMLElement | null, anchor: string): HTMLElement
 
 export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources: () => void }) {
   const [pages, setPages] = useState<PageSummary[]>([])
+  const [evidenceId, setEvidenceId] = useState<string | null>(null)
   const [issues, setIssues] = useState<WikiIssue[]>([])
   const [pageIndex, setPageIndex] = useState(0)
   const [listLoading, setListLoading] = useState(true)
@@ -608,7 +614,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
             <div className="wiki-editor-preview-labels"><span>Markdown 编辑器</span><span>预览</span></div>
             <div className="wiki-editor-preview">
               <MarkdownEditor key={selectedId} value={draft} syncVersion={editorSyncVersion} onChange={handleDraftChange} />
-              <div ref={previewRef} className="wiki-preview-wrap"><MarkdownPreview markdownText={draft} links={baseDetail?.links ?? []} onWikiNavigate={handleWikiNavigate} onExternalNavigate={handleExternalNavigate} onAnchor={scrollAnchor} /></div>
+              <div ref={previewRef} className="wiki-preview-wrap"><MarkdownPreview markdownText={draft} links={baseDetail?.links ?? []} onWikiNavigate={handleWikiNavigate} onExternalNavigate={handleExternalNavigate} onAnchor={scrollAnchor} onEvidence={setEvidenceId} /></div>
             </div>
 
             <section className="wiki-backlinks" aria-labelledby="wiki-backlinks-title">
@@ -621,6 +627,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
 
       <footer className="statusbar"><span className="statusbar-dot ready" /><span>Markdown 保存在 Vault</span><span className="statusbar-divider">·</span><span>{selectedId ? (dirty ? '有未保存更改' : '页面已同步') : '等待选择 Wiki 页面'}</span><span className="statusbar-spacer" /><span className="statusbar-note">文件内容是 Wiki 的权威版本</span></footer>
     </div>
+    {evidenceId && <EvidencePanel evidenceId={evidenceId} onClose={() => setEvidenceId(null)} />}
 
     {createOpen && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !creating) setCreateOpen(false) }}><section className="wiki-create-dialog" role="dialog" aria-modal="true" aria-labelledby="wiki-create-title"><div className="wiki-create-head"><div><div className="column-kicker">新建 Markdown 文件</div><h2 id="wiki-create-title">创建 Wiki 页面</h2></div><button type="button" className="icon-button" onClick={() => setCreateOpen(false)} disabled={creating} aria-label="关闭">×</button></div><form onSubmit={(event) => void createPage(event)}><label>页面标题<input autoFocus required maxLength={200} value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="例如：知识库导览" /></label><label>正文<textarea value={newBody} onChange={(event) => setNewBody(event.target.value)} rows={12} placeholder="写下页面正文。页面会以草稿状态创建。" /></label>{createError && <p className="wiki-form-error" role="alert">{createError}</p>}<div className="wiki-create-foot"><span>新页面会保存到 Wiki/Drafts</span><button type="button" className="secondary-button" onClick={() => setCreateOpen(false)} disabled={creating}>取消</button><button type="submit" className="primary-button" disabled={creating || !newTitle.trim()}>{creating ? '正在创建…' : '创建页面'}</button></div></form></section></div>}
   </main>

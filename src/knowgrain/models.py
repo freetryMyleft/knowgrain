@@ -419,6 +419,43 @@ class ReviewOperation(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class QueryJob(Base):
+    """Durable user question and immutable successful answer snapshot."""
+
+    __tablename__ = "query_job"
+    __table_args__ = (
+        CheckConstraint(
+            "length(question) BETWEEN 1 AND 1000 AND length(trim(question)) > 0",
+            name="ck_query_job_question_length",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'succeeded', 'failed')",
+            name="ck_query_job_state",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_query_job_attempts_nonnegative"),
+        CheckConstraint(
+            "(state = 'succeeded') = (result IS NOT NULL)",
+            name="ck_query_job_result_state",
+        ),
+        Index("ix_query_job_state_lease_created", "state", "lease_until", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    question: Mapped[str] = mapped_column(String(1000), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(String(4000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class PageGenerationBinding(Base):
     """Current reviewed Wiki identity mapped to its immutable generation manifest."""
 

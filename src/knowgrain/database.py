@@ -8,10 +8,17 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from knowgrain.models import GenerationJob, SourceDocument, SourceRevision, VaultBinding, WikiPage
+from knowgrain.models import (
+    GenerationJob,
+    QueryJob,
+    SourceDocument,
+    SourceRevision,
+    VaultBinding,
+    WikiPage,
+)
 
 
-EXPECTED_SCHEMA_REVISION = "0007_m3_review"
+EXPECTED_SCHEMA_REVISION = "0008_m4_queries"
 _VAULT_BINDING_LOCK_KEYS = (1263420247, 1196575049)
 
 
@@ -144,7 +151,13 @@ class ApplicationDatabase:
         source_count = select(func.count()).select_from(SourceDocument).scalar_subquery()
         wiki_count = select(func.count()).select_from(WikiPage).scalar_subquery()
         generation_count = select(func.count()).select_from(GenerationJob).scalar_subquery()
-        return int(await session.scalar(select(source_count + wiki_count + generation_count)) or 0)
+        query_count = select(func.count()).select_from(QueryJob).scalar_subquery()
+        return int(
+            await session.scalar(
+                select(source_count + wiki_count + generation_count + query_count)
+            )
+            or 0
+        )
 
     @staticmethod
     def _binding_snapshot(binding: VaultBinding) -> dict[str, Any]:

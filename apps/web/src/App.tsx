@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import VaultSettings from './VaultSettings'
 const WikiWorkspace = lazy(() => import('./WikiWorkspace'))
+const QuestionsWorkspace = lazy(() => import('./QuestionsWorkspace'))
 
 const API_ROOT = '/api/v1'
 const PAGE_SIZE = 100
@@ -227,7 +228,7 @@ function DependencyRow({ label, value }: { label: string; value: string }) {
 }
 
 export default function App() {
-  const [workspace, setWorkspace] = useState<'sources' | 'wiki'>('sources')
+  const [workspace, setWorkspace] = useState<'sources' | 'wiki' | 'questions'>('sources')
   const [sources, setSources] = useState<SourceSnapshot[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selected, setSelected] = useState<SourceSnapshot | null>(null)
@@ -525,6 +526,11 @@ export default function App() {
       <WikiWorkspace onReturnToSources={() => setWorkspace('sources')} />
     </Suspense>
   }
+  if (workspace === 'questions') {
+    return <Suspense fallback={<main className="desktop-shell"><section className="app-window"><p role="status">正在打开问答…</p></section></main>}>
+      <QuestionsWorkspace onReturnToSources={() => setWorkspace('sources')} />
+    </Suspense>
+  }
 
   return <main className="desktop-shell">
     <div className="app-window">
@@ -546,6 +552,9 @@ export default function App() {
           </div>
           <button className="side-nav-link" type="button" onClick={() => setWorkspace('wiki')}>
             <Icon name="file" size={17} /><span>Wiki</span>
+          </button>
+          <button className="side-nav-link" type="button" onClick={() => setWorkspace('questions')}>
+            <span aria-hidden="true">◇</span><span>问答</span>
           </button>
           <div className="sidebar-rule" />
 

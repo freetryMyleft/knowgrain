@@ -17,6 +17,10 @@ from knowgrain.config import Settings
 from knowgrain.generation_api import install_generation_routes
 from knowgrain.generation_repository import GenerationRepository
 from knowgrain.generation_service import GenerationService
+from knowgrain.evidence_access import EvidenceAccess
+from knowgrain.query_api import install_query_routes
+from knowgrain.query_repository import QueryRepository
+from knowgrain.query_service import QueryService
 from knowgrain.database import ApplicationDatabase
 from knowgrain.job_runner import IndexJobRunner
 from knowgrain.lightrag_runtime import LightRAGRuntime
@@ -112,6 +116,8 @@ class ApplicationRuntime:
     generation_repository: GenerationRepository = field(init=False)
     provenance_repository: ProvenanceRepository = field(init=False)
     generation: GenerationService = field(init=False)
+    query_repository: QueryRepository = field(init=False)
+    queries: QueryService = field(init=False)
     vault_ready: bool = field(default=False, init=False)
     vault_error: str | None = field(default=None, init=False)
     initialization_error: str | None = field(default=None, init=False)
@@ -135,6 +141,11 @@ class ApplicationRuntime:
             self.settings, self.generation_repository,
             ProvenanceService(self.provenance_repository, self.vault), self.lightrag, self.wiki,
         )
+        self.query_repository = QueryRepository(self.database)
+        self.queries = QueryService(
+            self.settings, self.query_repository, self.generation.provenance,
+            self.lightrag, EvidenceAccess(self.vault),
+        )
 
     async def initialize(self, *, force_model_validation: bool = False) -> bool:
         async with self._runtime_lock:
@@ -143,6 +154,7 @@ class ApplicationRuntime:
             self.vault_error = None
             # A retry may replace the Vault object. Stop and release the current
             # runner before setup touches files or installs new service references.
+            await self.queries.stop()
             await self.generation.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -165,6 +177,7 @@ class ApplicationRuntime:
                 self.jobs.start()
                 await self._start_wiki()
                 self.generation.start()
+                await self.queries.start()
             if self.lightrag.restart_required:
                 self.initialization_error = (
                     self.lightrag.restart_required_detail
@@ -211,6 +224,10 @@ class ApplicationRuntime:
             self.settings, self.generation_repository,
             ProvenanceService(self.provenance_repository, vault), self.lightrag, self.wiki,
         )
+        self.queries = QueryService(
+            self.settings, self.query_repository, self.generation.provenance,
+            self.lightrag, EvidenceAccess(vault),
+        )
 
     async def _start_wiki(self) -> None:
         try:
@@ -245,6 +262,7 @@ class ApplicationRuntime:
             )
             self.vault_ready = False
             self.vault_error = "Vault selection is being applied."
+            await self.queries.stop()
             await self.generation.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -268,6 +286,7 @@ class ApplicationRuntime:
             self.jobs.start()
             await self._start_wiki()
             self.generation.start()
+            await self.queries.start()
             return await self.vault_setup.status(ready=True, detail=None)
 
     def _redact_detail(self, detail: str) -> str:
@@ -287,6 +306,7 @@ class ApplicationRuntime:
 
     async def close(self) -> None:
         try:
+            await self.queries.stop()
             await self.generation.stop()
             await self.jobs.stop()
             await self.wiki.stop()
@@ -367,6 +387,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     install_wiki_routes(app)
     install_generation_routes(app)
+    install_query_routes(app)
 
     @app.middleware("http")
     async def validate_write_origin(request: Request, call_next):
