@@ -18,6 +18,9 @@ from knowgrain.generation_api import install_generation_routes
 from knowgrain.generation_repository import GenerationRepository
 from knowgrain.generation_service import GenerationService
 from knowgrain.evidence_access import EvidenceAccess
+from knowgrain.entity_mapping_api import install_entity_mapping_routes
+from knowgrain.entity_mapping_repository import EntityMappingRepository
+from knowgrain.entity_mapping_service import EntityMappingService
 from knowgrain.query_api import install_query_routes
 from knowgrain.query_repository import QueryRepository
 from knowgrain.query_service import QueryService
@@ -118,6 +121,7 @@ class ApplicationRuntime:
     generation: GenerationService = field(init=False)
     query_repository: QueryRepository = field(init=False)
     queries: QueryService = field(init=False)
+    entity_mapping: EntityMappingService = field(init=False)
     vault_ready: bool = field(default=False, init=False)
     vault_error: str | None = field(default=None, init=False)
     initialization_error: str | None = field(default=None, init=False)
@@ -145,6 +149,9 @@ class ApplicationRuntime:
         self.queries = QueryService(
             self.settings, self.query_repository, self.generation.provenance,
             self.lightrag, EvidenceAccess(self.vault),
+        )
+        self.entity_mapping = EntityMappingService(
+            self.generation, EntityMappingRepository(self.database), self.lightrag, self.wiki,
         )
 
     async def initialize(self, *, force_model_validation: bool = False) -> bool:
@@ -227,6 +234,9 @@ class ApplicationRuntime:
         self.queries = QueryService(
             self.settings, self.query_repository, self.generation.provenance,
             self.lightrag, EvidenceAccess(vault),
+        )
+        self.entity_mapping = EntityMappingService(
+            self.generation, EntityMappingRepository(self.database), self.lightrag, self.wiki,
         )
 
     async def _start_wiki(self) -> None:
@@ -388,6 +398,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_wiki_routes(app)
     install_generation_routes(app)
     install_query_routes(app)
+    install_entity_mapping_routes(app)
 
     @app.middleware("http")
     async def validate_write_origin(request: Request, call_next):

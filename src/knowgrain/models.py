@@ -268,6 +268,7 @@ class EvidenceRef(Base):
         CheckConstraint("length(excerpt) = \"end\" - start", name="ck_evidence_ref_excerpt_length"),
         CheckConstraint("page IS NULL OR page > 0", name="ck_evidence_ref_page_positive"),
         Index("ix_evidence_ref_source_revision", "source_id", "revision_id"),
+        Index("ix_evidence_ref_chunk", "chunk_id"),
     )
 
     evidence_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)

@@ -18,7 +18,7 @@ from knowgrain.models import (
 )
 
 
-EXPECTED_SCHEMA_REVISION = "0008_m4_queries"
+EXPECTED_SCHEMA_REVISION = "0009_m4_entity_lookup"
 _VAULT_BINDING_LOCK_KEYS = (1263420247, 1196575049)
 
 

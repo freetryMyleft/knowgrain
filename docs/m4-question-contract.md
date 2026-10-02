@@ -1,6 +1,6 @@
 # M4 questions and evidence navigation
 
-This contract defines the current implementation node. M4 also requires Wiki/Core entity mappings; those are not accepted by completing the question node alone.
+This contract defines the current implementation node. M4 also requires Wiki/Core entity mappings, implemented and independently verified in the subsequent [entity node](m4-entity-mapping-contract.md); the question node alone does not establish that result.
 
 ## HTTP and UI
 
@@ -24,7 +24,7 @@ Web questions poll the durable job, expose retry, restore saved results after na
 
 `QueryRepository` methods: enqueue(question), list_jobs(limit, offset), get_job(id), claim_next(owner, lease_seconds=90), renew(id, owner, lease_seconds=90), complete(id, owner, result, evidence), fail(id, owner, error), retry(id). Snapshots use `job_id, question, state, attempts, error, created_at, updated_at, lease_until, result`. Completion locks source/revision rows and checks the same active/current/latest/ready/hash/index-time predicate as generation, inserts immutable shared evidence rows, and commits the result atomically. Lease decisions use database time after lock waits and before final writes. Read-only history is never presented as current without fresh verification.
 
-Migration `0008_m4_queries` adds `query_job` with bounded question, state, attempts, owner/lease, result JSONB, safe error and timestamps. No original documents or Wiki bodies are duplicated. Existing `evidence_ref` is reused, with exact immutable equality checks. Application readiness requires this migration; it is applied explicitly, never by startup.
+Migration `0008_m4_queries` adds `query_job` with bounded question, state, attempts, owner/lease, result JSONB, safe error and timestamps. No original documents or Wiki bodies are duplicated. Existing `evidence_ref` is reused, with exact immutable equality checks. This was the question node schema head; the subsequent entity node adds `0009_m4_entity_lookup`, now required by readiness. Migrations are applied explicitly, never by startup.
 
 `EvidenceAccess(vault)` owns exclusive canonical evidence publication and bounded original/Markdown reading. Reads reject path escapes and symlinks, compare full hashes and file identity before/after reading, and return captured verified bytes rather than reopening a path after verification.
 
@@ -35,4 +35,4 @@ Migration `0008_m4_queries` adds `query_job` with bounded question, state, attem
 - Luna service: query_contract.py, query_service.py, query_api.py and focused contract/service/API tests.
 - Luna frontend: QuestionsWorkspace.tsx, EvidencePanel.tsx, question-contract.ts, question.css, WikiWorkspace.tsx/WikiGenerationPanel.tsx evidence navigation and focused frontend checks. App.tsx navigation remains Sol-owned.
 
-Acceptance requires actual Web → durable job → local qwen3.6:35b → verified citations → exact original, plus stale/no-evidence failure checks. Mocked model tests do not establish real model quality. Full M4 acceptance still includes graph/page bindings.
+Acceptance requires actual Web → durable job → local qwen3.6:35b → verified citations → exact original, plus stale/no-evidence failure checks. Mocked model tests do not establish real model quality. Subsequent graph/page binding acceptance is recorded separately in the entity-node verification.

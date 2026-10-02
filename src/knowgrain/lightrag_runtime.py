@@ -1,14 +1,24 @@
 import asyncio
+import hashlib
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+import unicodedata
+from typing import Any, Literal, Sequence
 from uuid import UUID
 
 from knowgrain.config import Settings
+from knowgrain.m3_types import Evidence
 
 QueryMode = Literal["local", "global", "hybrid", "mix", "naive"]
 
 _READINESS_TIMEOUT_SECONDS = 3.0
+_MAX_EVIDENCE_ITEMS = 24
+_MAX_ENTITY_CANDIDATES = 500
+_MAX_MAPPED_ENTITIES = 100
+_MAX_ENTITY_CHUNKS = 10_000
+_MAX_ENTITY_NAME_LENGTH = 512
+_MAX_ENTITY_TYPE_LENGTH = 256
+_MAX_ENTITY_CHUNK_ID_LENGTH = 512
 _PARTIAL_STORAGE_ATTRIBUTES = (
     "full_docs",
     "text_chunks",
@@ -409,6 +419,258 @@ class LightRAGRuntime:
             # parent document ID is the revision UUID supplied by index_text.
             verified.append({**chunk, "source_revision_id": str(revision_id)})
         return {**raw, "data": {**raw["data"], "chunks": verified}}
+
+    async def entities_for_evidence(self, evidence: Sequence[Evidence]) -> dict[str, Any]:
+        """Map current evidence chunks to graph entities without using graph summaries.
+
+        Candidate names come from the exact source revisions, then complete
+        ``entity_chunks`` membership is intersected with text chunks that were
+        independently verified against the evidence quote and revision.
+        """
+        rag = self._require_started()
+        if (
+            isinstance(evidence, (str, bytes))
+            or not isinstance(evidence, Sequence)
+            or len(evidence) > _MAX_EVIDENCE_ITEMS
+        ):
+            raise ValueError("Evidence list is invalid or exceeds the entity mapping limit")
+        if any(not isinstance(item, Evidence) for item in evidence):
+            raise ValueError("Evidence list contains an invalid record")
+        if len({item.evidence_id for item in evidence}) != len(evidence):
+            raise ValueError("Evidence list contains duplicate identities")
+        if not evidence:
+            return {"entities": [], "truncated": False}
+
+        by_chunk: dict[str, list[Evidence]] = {}
+        for item in evidence:
+            if (
+                not isinstance(item.evidence_id, UUID)
+                or not isinstance(item.revision_id, UUID)
+                or not self._valid_entity_chunk_id(item.chunk_id)
+                or not isinstance(item.excerpt, str)
+                or not item.excerpt
+            ):
+                continue
+            by_chunk.setdefault(item.chunk_id, []).append(item)
+        if not by_chunk:
+            return {"entities": [], "truncated": False}
+
+        text_chunk_ids = sorted(by_chunk)
+        text_records = await rag.text_chunks.get_by_ids(text_chunk_ids)
+        if not isinstance(text_records, list) or len(text_records) != len(text_chunk_ids):
+            return {"entities": [], "truncated": False}
+
+        verified_chunks: dict[str, set[str]] = {}
+        revision_ids: set[UUID] = set()
+        for chunk_id, record in zip(text_chunk_ids, text_records, strict=True):
+            if not isinstance(record, dict):
+                continue
+            raw_revision_id = record.get("full_doc_id")
+            content = record.get("content")
+            if not isinstance(raw_revision_id, str) or not isinstance(content, str):
+                continue
+            try:
+                revision_id = UUID(raw_revision_id)
+            except (ValueError, AttributeError):
+                continue
+            citation_ids = {
+                str(item.evidence_id)
+                for item in by_chunk[chunk_id]
+                if item.revision_id == revision_id and content.startswith(item.excerpt)
+            }
+            if citation_ids:
+                verified_chunks[chunk_id] = citation_ids
+                revision_ids.add(revision_id)
+        if not verified_chunks:
+            return {"entities": [], "truncated": False}
+
+        ordered_revisions = sorted(revision_ids, key=str)
+        document_records = await rag.full_entities.get_by_ids(
+            [str(revision_id) for revision_id in ordered_revisions]
+        )
+        if not isinstance(document_records, list) or len(document_records) != len(ordered_revisions):
+            return {"entities": [], "truncated": False}
+
+        candidate_names: set[str] = set()
+        for record in document_records:
+            if not isinstance(record, dict):
+                continue
+            names = record.get("entity_names")
+            count = record.get("count")
+            if (
+                not isinstance(names, list)
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count != len(names)
+            ):
+                continue
+            candidate_names.update(
+                name for name in names if self._valid_entity_name(name)
+            )
+
+        all_names = sorted(candidate_names)
+        candidates_truncated = len(all_names) > _MAX_ENTITY_CANDIDATES
+        selected_names = all_names[:_MAX_ENTITY_CANDIDATES]
+        if not selected_names:
+            return {"entities": [], "truncated": candidates_truncated}
+
+        entity_chunk_records = await rag.entity_chunks.get_by_ids(selected_names)
+        if (
+            not isinstance(entity_chunk_records, list)
+            or len(entity_chunk_records) != len(selected_names)
+        ):
+            return {"entities": [], "truncated": candidates_truncated}
+
+        citations_by_name: dict[str, list[str]] = {}
+        for name, record in zip(selected_names, entity_chunk_records, strict=True):
+            chunk_ids = self._complete_entity_chunk_membership(record)
+            if chunk_ids is None:
+                continue
+            citations = sorted(
+                {
+                    evidence_id
+                    for chunk_id in chunk_ids
+                    for evidence_id in verified_chunks.get(chunk_id, ())
+                }
+            )
+            if citations:
+                citations_by_name[name] = citations
+        if not citations_by_name:
+            return {"entities": [], "truncated": candidates_truncated}
+
+        supported_names = sorted(citations_by_name)
+        graph_nodes = await rag.chunk_entity_relation_graph.get_nodes_batch(supported_names)
+        if not isinstance(graph_nodes, dict):
+            return {"entities": [], "truncated": candidates_truncated}
+
+        entities: list[dict[str, Any]] = []
+        for name in supported_names:
+            node = graph_nodes.get(name)
+            if not isinstance(node, dict):
+                continue
+            node_name = node.get("entity_name")
+            if node_name is not None and node_name != name:
+                continue
+            raw_type = node.get("entity_type", "UNKNOWN")
+            entity_type = self._safe_entity_type(raw_type)
+            if entity_type is None:
+                continue
+            entities.append(
+                {
+                    "entity_id": hashlib.sha256(name.encode("utf-8")).hexdigest(),
+                    "name": name,
+                    "entity_type": entity_type,
+                    "evidence_ids": citations_by_name[name],
+                }
+            )
+
+        truncated = candidates_truncated or len(entities) > _MAX_MAPPED_ENTITIES
+        return {
+            "entities": entities[:_MAX_MAPPED_ENTITIES],
+            "truncated": truncated,
+        }
+
+    async def entity_chunk_ids(self, name: str) -> tuple[str, ...]:
+        """Return bounded complete chunk membership for a graph entity candidate."""
+        self._validate_entity_name(name)
+        rag = self._require_started()
+        graph_nodes = await rag.chunk_entity_relation_graph.get_nodes_batch([name])
+        if not isinstance(graph_nodes, dict) or not isinstance(graph_nodes.get(name), dict):
+            return ()
+
+        record = await rag.entity_chunks.get_by_id(name)
+        if record is None:
+            return ()
+        if not isinstance(record, dict):
+            return ()
+        chunk_ids = record.get("chunk_ids")
+        count = record.get("count")
+        if not isinstance(chunk_ids, list):
+            return ()
+        if isinstance(count, bool) or not isinstance(count, int) or count != len(chunk_ids):
+            return ()
+        if count > _MAX_ENTITY_CHUNKS:
+            raise RuntimeError("Entity chunk membership exceeds the supported limit")
+        if any(not self._valid_entity_chunk_id(chunk_id) for chunk_id in chunk_ids):
+            return ()
+        if len(set(chunk_ids)) != len(chunk_ids):
+            return ()
+        return tuple(sorted(chunk_ids))
+
+    @classmethod
+    def _validate_entity_name(cls, name: str) -> str:
+        if not cls._valid_entity_name(name):
+            raise ValueError("Entity name must contain 1–512 valid Unicode characters")
+        return name
+
+    @staticmethod
+    def _valid_entity_name(name: Any) -> bool:
+        if not isinstance(name, str) or not 1 <= len(name) <= _MAX_ENTITY_NAME_LENGTH:
+            return False
+        if not name.strip() or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for character in name
+        ):
+            return False
+        try:
+            name.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return False
+        return True
+
+    @staticmethod
+    def _valid_entity_chunk_id(chunk_id: Any) -> bool:
+        if not isinstance(chunk_id, str) or not 1 <= len(chunk_id) <= _MAX_ENTITY_CHUNK_ID_LENGTH:
+            return False
+        if any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for character in chunk_id
+        ):
+            return False
+        try:
+            chunk_id.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return False
+        return True
+
+    @staticmethod
+    def _complete_entity_chunk_membership(record: Any) -> list[str] | None:
+        if not isinstance(record, dict):
+            return None
+        chunk_ids = record.get("chunk_ids")
+        count = record.get("count")
+        if (
+            not isinstance(chunk_ids, list)
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count != len(chunk_ids)
+        ):
+            return None
+        if count > _MAX_ENTITY_CHUNKS:
+            raise RuntimeError("Entity chunk membership exceeds the supported limit")
+        if any(not LightRAGRuntime._valid_entity_chunk_id(item) for item in chunk_ids):
+            return None
+        if len(set(chunk_ids)) != len(chunk_ids):
+            return None
+        return chunk_ids
+
+    @staticmethod
+    def _safe_entity_type(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value:
+            return "UNKNOWN"
+        if len(value) > _MAX_ENTITY_TYPE_LENGTH or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for character in value
+        ):
+            return None
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return None
+        return value
 
     async def generate_json(self, system_prompt: str, prompt: str) -> str:
         """Use the configured Core model callback after application evidence filtering.

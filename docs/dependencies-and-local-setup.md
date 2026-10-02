@@ -1,6 +1,6 @@
 # Knowgrain 依赖清单与本地安装建议
 
-状态：实施中（2026-10-02）。仓库已有锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务，以及真实 API 驱动的资料/Wiki/问答界面。主题生成、明确审阅、提案应用、逐条问答引用和证据导航已实现；当前运行默认使用 Ollama `qwen3.6:35b` 与 `qwen3-embedding:0.6b`。真实 Core/上传、Vault 绑定、Wiki 冲突和 M3 审阅见 [开发状态](development-status.md)中的验收记录。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。完整图谱页面绑定、安装向导、恢复/发布及第三方模型配置仍未完成。本页区分当前运行步骤与后续依赖建议。
+状态：实施中（2026-10-02）。仓库已有锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务，以及真实 API 驱动的资料/Wiki/问答界面。主题生成、明确审阅、提案应用、逐条问答引用和证据导航已实现；当前运行默认使用 Ollama `qwen3.6:35b` 与 `qwen3-embedding:0.6b`。真实 Core/上传、Vault 绑定、Wiki 冲突和 M3 审阅见 [开发状态](development-status.md)中的验收记录。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。Wiki/LightRAG 实体双向导航已实现；完整图谱可视化、安装向导、恢复/发布及第三方模型配置仍未完成。本页区分当前运行步骤与后续依赖建议。
 
 ## 1. 推荐组合
 
@@ -81,8 +81,8 @@ ollama list
 1. 安装 Git、Docker Desktop、Python 3.12、`uv`、Node.js 22.12+（或 24 LTS）、Ollama。在 macOS 上可用各工具官方安装包；Obsidian 按需要安装。
 2. 用 `docker version`、`docker compose version`、`python3 --version`、`uv --version`、`node --version`、`npm --version` 检查工具可用。
 3. 在仓库根目录执行 `uv sync --locked` 安装当前 Python 依赖。
-4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0008_m4_queries`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。
-5. 在 `.env` 设置 `VAULT_ROOT`（默认 `./data/vault`），启动 Ollama 并执行 `make models` 下载示例模型，再运行 `make demo` 验证 LightRAG Core 的最小导入与结构化检索。`make api` 启动常驻进程；使用 `/docs` 或 README 的 curl 上传资料、查看修订/任务和重试。手动 Wiki 操作仅依赖应用数据库和 Vault；模型生成与第三方模型切换属于后续实现。
+4. 执行 `make configure`、启动 Docker Desktop，然后运行 `make db-up` 创建应用数据库与 LightRAG 数据库；`vector` 扩展由初始化 SQL 在 LightRAG 数据库启用。执行 `make migrate` 显式迁移到 `0009_m4_entity_lookup`；API 启动不会自动建表或迁移旧库。先备份已有数据库与 Vault，再升级。
+5. 在 `.env` 设置 `VAULT_ROOT`（默认 `./data/vault`），启动 Ollama 并执行 `make models` 下载示例模型，再运行 `make demo` 验证 LightRAG Core 的最小导入与结构化检索。`make api` 启动常驻进程；使用 `/docs` 或 README 的 curl 上传资料、查看修订/任务和重试。手动 Wiki 操作仅依赖应用数据库和 Vault；生成和问答需要本机模型联通。第三方模型切换属于后续实现。
 
 当前可执行的开发启动命令如下；`docker compose` 要求 Docker Desktop 已启动，Ollama 也必须已启动：
 

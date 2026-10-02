@@ -18,6 +18,7 @@ import {
 } from './wiki-contract'
 import type { Backlink, BacklinkResponse, ConflictDetail, PageDetail, PageListResponse, PageSummary, WikiIssue, WikiLink } from './wiki-contract'
 import WikiGenerationPanel from './WikiGenerationPanel'
+import WikiEntityPanel from './WikiEntityPanel'
 import EvidencePanel from './EvidencePanel'
 import { evidenceIdFromWikiTarget } from './question-contract'
 import './wiki.css'
@@ -617,6 +618,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
               <div ref={previewRef} className="wiki-preview-wrap"><MarkdownPreview markdownText={draft} links={baseDetail?.links ?? []} onWikiNavigate={handleWikiNavigate} onExternalNavigate={handleExternalNavigate} onAnchor={scrollAnchor} onEvidence={setEvidenceId} /></div>
             </div>
 
+            <WikiEntityPanel key={`${current.page_id}:${current.content_sha256}`} pageId={current.page_id} contentHash={current.content_sha256} dirty={dirty || saving || Boolean(conflict)} onOpenPage={(id) => { navigateToPage(id) }} />
             <section className="wiki-backlinks" aria-labelledby="wiki-backlinks-title">
               <div className="wiki-section-title"><h3 id="wiki-backlinks-title">反向链接</h3><span>{backlinks.length}</span></div>
               {backlinkError ? <p className="wiki-muted-line">反向链接暂时无法载入：{backlinkError}</p> : backlinks.length === 0 ? <p className="wiki-muted-line">还没有其他页面链接到这里。</p> : <div className="wiki-backlink-list">{backlinks.map((link, index) => <button key={`${link.page_id}-${link.line}-${index}`} type="button" onClick={() => navigateToPage(link.page_id)}><span className="wiki-backlink-arrow">↗</span><span><strong>{link.title}</strong><small>{link.vault_path} · 第 {link.line} 行{link.anchor ? ` · #${link.anchor}` : ''}</small></span></button>)}</div>}

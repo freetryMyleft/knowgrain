@@ -1,0 +1,17 @@
+.wiki-entity-section { margin: 24px 28px; padding: 22px 0; border-top: 1px solid #e9e7e2; }
+.wiki-entity-head, .entity-links-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.wiki-entity-head h2 { margin: 4px 0; font-size: 17px; font-weight: 650; }
+.entity-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.entity-pill { display: flex; gap: 8px; align-items: center; max-width: 100%; padding: 8px 12px; border: 1px solid #e3e0d9; border-radius: 10px; background: #fcfbf8; color: #514d46; text-align: left; cursor: pointer; }
+.entity-pill strong { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.entity-pill small { font-size: 10px; color: #868176; overflow-wrap: anywhere; }
+.entity-pill.selected { border-color: #b6c5b2; background: #edf2e9; }
+.entity-pill:focus-visible, .entity-page-open:focus-visible { outline: 2px solid #7c9774; outline-offset: 3px; }
+.entity-links { margin-top: 16px; border: 1px solid #e8e5de; border-radius: 12px; padding: 15px; background: #f9f8f4; }
+.entity-links-head strong { font-size: 12px; overflow-wrap: anywhere; }
+.entity-linked-page { padding: 12px 0; border-top: 1px solid #e9e7e2; margin-top: 12px; }
+.entity-page-open { display: flex; flex-direction: column; gap: 4px; background: transparent; border: 0; color: #4d5948; padding: 0; text-align: left; cursor: pointer; width: 100%; }
+.entity-page-open strong { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.entity-page-open small { color: #8d877c; font-size: 10px; overflow-wrap: anywhere; }
+.entity-evidence-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+@media (max-width: 600px) { .wiki-entity-section { margin: 20px 16px; } .wiki-entity-head { align-items: flex-start; } .entity-pill { flex-wrap: wrap; } }
