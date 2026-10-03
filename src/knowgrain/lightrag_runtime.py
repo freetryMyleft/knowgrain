@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import math
 from functools import partial
 from pathlib import Path
 import unicodedata
@@ -7,6 +8,9 @@ from typing import Any, Awaitable, Callable, Literal, Sequence
 from uuid import UUID
 
 from knowgrain.config import Settings
+from knowgrain.core_lifecycle import (
+    CoreCallGate, CoreCloseProof, admitted_core_call, close_core_strict,
+)
 from knowgrain.index_identity import CoreIndexIdentity
 from knowgrain.m3_types import Evidence
 
@@ -46,7 +50,23 @@ class LightRAGRuntime:
         settings: Settings,
         *,
         index_identity: CoreIndexIdentity | None = None,
+        close_timeout_seconds: float = 30,
     ) -> None:
+        try:
+            valid_close_timeout = (
+                not isinstance(close_timeout_seconds, bool)
+                and isinstance(close_timeout_seconds, (int, float))
+                and math.isfinite(close_timeout_seconds) and close_timeout_seconds > 0
+            )
+        except (OverflowError, ValueError):
+            valid_close_timeout = False
+        if not valid_close_timeout:
+            raise ValueError("close_timeout_seconds must be finite and positive")
+        self._close_timeout_seconds = close_timeout_seconds
+        self._call_gate = CoreCallGate()
+        self._close_task: asyncio.Task[None] | None = None
+        self._core_epoch = 0
+        self._last_close_proof: CoreCloseProof | None = None
         self._settings = settings
         if index_identity is not None and not isinstance(index_identity, CoreIndexIdentity):
             raise TypeError("index_identity must be a CoreIndexIdentity")
@@ -64,7 +84,11 @@ class LightRAGRuntime:
 
     @property
     def is_ready(self) -> bool:
-        return self._rag is not None
+        return self._rag is not None and not self._call_gate.closed and not self.restart_required
+
+    @property
+    def last_close_proof(self) -> CoreCloseProof | None:
+        return self._last_close_proof
 
     @property
     def index_identity(self) -> CoreIndexIdentity:
@@ -90,10 +114,17 @@ class LightRAGRuntime:
                     self._restart_required_detail
                     or "LightRAG requires a Knowgrain process restart before retrying"
                 )
+            if self._close_task is not None and not self._close_task.done():
+                raise RuntimeError("LightRAG Core is closing")
             if self._rag is not None:
                 return
-
+            self._close_task = None
+            self._last_close_proof = None
+            self._core_epoch += 1
             await self._start_unlocked()
+            # close() may close admission while initialization holds this lock.
+            if self._close_task is None:
+                self._call_gate.open()
 
     async def validate_model_configuration(self) -> None:
         """Check configured Ollama models and measure one actual embedding vector."""
@@ -423,32 +454,48 @@ class LightRAGRuntime:
         return f"{type(exc).__name__}: {exc}"
 
     async def close(self) -> None:
+        """Close admission immediately; retain cleanup when observation is interrupted."""
         self._bind_event_loop()
-        async with self._lifecycle_lock:
-            async with self._write_lock:
+        if self._call_gate.owns_current_task():
+            raise RuntimeError("Cannot close LightRAG Core from an admitted Core call")
+        self._call_gate.close()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_retained())
+            # Always observe failure even if the only caller was cancelled/timed out.
+            self._close_task.add_done_callback(self._observe_close_task)
+        try:
+            async with asyncio.timeout(self._close_timeout_seconds):
+                await asyncio.shield(self._close_task)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            self._latch_close_failure(type(exc).__name__)
+            raise
+
+    @staticmethod
+    def _observe_close_task(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    def _latch_close_failure(self, kind: str) -> None:
+        if self._restart_required_detail is None:
+            self._restart_required_detail = (
+                f"LightRAG Core shutdown could not be proved ({kind}); "
+                "restart the Knowgrain process before retrying"
+            )
+
+    async def _close_retained(self) -> None:
+        try:
+            async with self._lifecycle_lock:
+                await self._call_gate.drained.wait()
                 if self._rag is not None:
                     rag = self._rag
-                    try:
-                        # Cancelling the queue caller can leave its provider worker
-                        # running. End and drain these workers before their cache
-                        # storages are finalized.
-                        callbacks = getattr(rag, "role_llm_funcs", {})
-                        seen = set()
-                        for callback in callbacks.values():
-                            if id(callback) in seen:
-                                continue
-                            seen.add(id(callback))
-                            shutdown = getattr(callback, "shutdown", None)
-                            if callable(shutdown):
-                                await shutdown(graceful=False)
-                        await rag.finalize_storages()
-                    except BaseException as close_error:
-                        self._restart_required_detail = (
-                            "LightRAG storage finalization failed "
-                            f"({type(close_error).__name__}); restart the Knowgrain process "
-                            "before retrying"
-                        )
-                        raise
+                    proof = await close_core_strict(
+                        rag, epoch=self._core_epoch,
+                        operations_drained=self._call_gate.count == 0,
+                    )
+                    self._last_close_proof = proof
+                    if not proof.succeeded:
+                        self._latch_close_failure("failed proof")
+                        raise RuntimeError("LightRAG Core shutdown proof failed: " + "; ".join(proof.errors))
                     self._rag = None
                     self._partial_rag = None
                 elif self._partial_rag is not None:
@@ -456,16 +503,29 @@ class LightRAGRuntime:
                         self._partial_rag
                     )
                     if cleanup_was_cancelled:
-                        detail = "Could not finalize partial LightRAG storages"
-                        if cleanup_failures:
-                            detail += ": " + ", ".join(cleanup_failures)
-                        raise asyncio.CancelledError(detail)
+                        raise asyncio.CancelledError("Partial Core cleanup was interrupted")
                     if cleanup_failures:
-                        raise RuntimeError(
-                            "Could not finalize partial LightRAG storages: "
-                            + ", ".join(cleanup_failures)
-                        )
+                        raise RuntimeError("Partial Core cleanup failed: " + ", ".join(cleanup_failures))
+        except BaseException as exc:
+            self._latch_close_failure(type(exc).__name__)
+            if self._rag is not None and self._last_close_proof is None:
+                self._last_close_proof = CoreCloseProof(
+                    id(self._rag), self._core_epoch, self._call_gate.count == 0,
+                    False, False, False, False, False,
+                    (f"shutdown interrupted ({type(exc).__name__})",),
+                )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if self._last_close_proof is not None and self._last_close_proof.errors:
+                raise RuntimeError(
+                    "LightRAG Core shutdown proof failed: "
+                    + "; ".join(self._last_close_proof.errors)
+                ) from None
+            raise RuntimeError(
+                f"LightRAG Core shutdown failed ({type(exc).__name__})"
+            ) from None
 
+    @admitted_core_call
     async def index_text(
         self,
         *,
@@ -486,6 +546,7 @@ class LightRAGRuntime:
                 document_status = document.get("status", "missing") if document else "missing"
                 raise RuntimeError(f"LightRAG document was not processed ({document_status})")
 
+    @admitted_core_call
     async def delete_revision(
         self,
         *,
@@ -561,6 +622,7 @@ class LightRAGRuntime:
 
             await self._assert_revision_absent(rag, doc_id, manifest)
 
+    @admitted_core_call
     async def inspect_revision(
         self,
         *,
@@ -948,6 +1010,7 @@ class LightRAGRuntime:
         if any(record is not None for record in chunk_records):
             raise RuntimeError("LightRAG document cleanup left owned text chunks behind")
 
+    @admitted_core_call
     async def retrieve(self, query: str, *, mode: QueryMode = "mix") -> dict[str, Any]:
         from lightrag import QueryParam
 
@@ -981,6 +1044,7 @@ class LightRAGRuntime:
             verified.append({**chunk, "source_revision_id": str(revision_id)})
         return {**raw, "data": {**raw["data"], "chunks": verified}}
 
+    @admitted_core_call
     async def entities_for_evidence(self, evidence: Sequence[Evidence]) -> dict[str, Any]:
         """Map current evidence chunks to graph entities without using graph summaries.
 
@@ -1131,6 +1195,7 @@ class LightRAGRuntime:
             "truncated": truncated,
         }
 
+    @admitted_core_call
     async def entity_chunk_ids(self, name: str) -> tuple[str, ...]:
         """Return bounded complete chunk membership for a graph entity candidate."""
         self._validate_entity_name(name)
@@ -1233,6 +1298,7 @@ class LightRAGRuntime:
             return None
         return value
 
+    @admitted_core_call
     async def generate_json(self, system_prompt: str, prompt: str) -> str:
         """Use the configured Core model callback after application evidence filtering.
 

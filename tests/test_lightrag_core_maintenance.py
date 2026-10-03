@@ -1,11 +1,12 @@
 import asyncio
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from knowgrain.config import Settings
 from knowgrain.lightrag_runtime import LightRAGRuntime
+from tests.test_core_lifecycle import install_close_protocol
 
 
 class StrictStore:
@@ -362,12 +363,14 @@ class CoreMaintenanceAdapterTests(unittest.IsolatedAsyncioTestCase):
                 "chunks_list": [],
             }
 
-        async def finalize():
+        async def finalize(name):
             finalized.set()
 
         self.rag.ainsert = index
-        self.rag.finalize_storages = finalize
-        self.rag.role_llm_funcs = {}
+        _, registry, _ = install_close_protocol(self.rag, on_finalize=finalize)
+        registry_patch = patch("lightrag.kg.postgres_impl.ClientManager._instances", registry)
+        registry_patch.start()
+        self.addCleanup(registry_patch.stop)
         indexing = asyncio.create_task(
             self.runtime.index_text(
                 source_id=self.revision_id,

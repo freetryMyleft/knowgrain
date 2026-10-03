@@ -102,6 +102,8 @@ make demo
 
 旧安装升级时核对实际工作区：固定版LightRAG读取 `POSTGRES_WORKSPACE`（日志称为 `PG_WORKSPACE`），也可能读取 `config.ini` 的 `[postgres] workspace`。它们与 `LIGHTRAG_WORKSPACE` 不同时，新默认运行时明确拒绝启动Core；先将配置同步到原实例实际使用的 namespace，再重启 API。Settings 与默认索引身份在应用构造时固定，“重连服务”不会重新读取 `.env`。不要更改工作区名来绕过故障。现有默认入口仍保留旧无后缀向量表，内部显式目标身份已验证；[身份验收](verification/m5-core-identity-2026-10-03.md) 不代表全量重建按钮已上线。
 
+Core 关闭会先拒绝新调用，等待已进入的读写、向量缓冲、模型队列和解析线程，再严格核验十二个存储及 PostgreSQL pool。调用者超时或取消时清理仍继续，但该运行时保持需要重启，不能仅用“重连服务”绕过；检查进程和清理日志后按原配置正常重启。不能因为观察超时重复启动另一实例。详见 [关闭验收](verification/m5-core-close-2026-10-03.md)；完整工作区重建与持久化协调器仍待交付。
+
 健康检查：
 
 ```sh

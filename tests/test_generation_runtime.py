@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from knowgrain.config import Settings
 from knowgrain.lightrag_runtime import LightRAGRuntime
+from tests.test_core_lifecycle import install_close_protocol
 
 
 class GenerationRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -50,12 +51,13 @@ class GenerationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(llm_response_cache=None), "query", provider, 1, 30, {},
         )
 
-        async def finalize():
+        async def finalized(name):
             self.assertTrue(stopped.is_set(), "provider must finish before cache storage closes")
 
-        runtime._rag = SimpleNamespace(
-            role_llm_funcs={"query": callback}, finalize_storages=finalize,
-        )
+        runtime._rag, registry, _ = install_close_protocol(callback=callback, on_finalize=finalized)
+        registry_patch = patch("lightrag.kg.postgres_impl.ClientManager._instances", registry)
+        registry_patch.start()
+        self.addCleanup(registry_patch.stop)
         generating = asyncio.create_task(runtime.generate_json("system", "synthetic quote"))
         try:
             await asyncio.wait_for(started.wait(), 1)
