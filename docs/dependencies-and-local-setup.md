@@ -1,6 +1,6 @@
 # Knowgrain 依赖清单与本地安装建议
 
-状态：实施中（2026-10-02）。仓库已有锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务，以及真实 API 驱动的资料/Wiki/问答界面。主题生成、明确审阅、提案应用、逐条问答引用和证据导航已实现；当前运行默认使用 Ollama `qwen3.6:35b` 与 `qwen3-embedding:0.6b`。真实 Core/上传、Vault 绑定、Wiki 冲突和 M3 审阅见 [开发状态](development-status.md)中的验收记录。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。Wiki/LightRAG 实体双向导航已实现；完整图谱可视化、安装向导、恢复/发布及第三方模型配置仍未完成。本页区分当前运行步骤与后续依赖建议。
+状态：实施中（2026-10-03）。仓库已有锁文件、PostgreSQL Compose、LightRAG CLI、FastAPI、应用迁移、Vault 导入、四类解析器、索引任务，以及真实 API 驱动的资料/Wiki/问答界面。主题生成、明确审阅、提案应用、逐条问答引用和证据导航已实现；当前运行默认使用 Ollama `qwen3.6:35b` 与 `qwen3-embedding:0.6b`。真实 Core/上传、Vault 绑定、Wiki 冲突和 M3 审阅见 [开发状态](development-status.md)中的验收记录。此次使用隔离 PostgreSQL 16.14；Compose PostgreSQL 18 与远端 CI 尚未执行。Wiki/LightRAG 实体双向导航与完整备份的隔离恢复已验证；完整图谱可视化、安装向导、全量索引重建、发布及第三方模型配置仍未完成。本页区分当前运行步骤与后续依赖建议。
 
 ## 1. 推荐组合
 
@@ -98,7 +98,7 @@ make demo
 
 另开一个终端运行 `make api`（执行 `uv run knowgrain-api`）。API 默认只监听本机 `127.0.0.1:8787`。启动前会用带 3 秒连接/查询超时的 PostgreSQL `SELECT 1` 做预检；数据库不可用时，API 进程仍会启动并暴露存活与就绪检查，就绪状态为 503。数据库恢复后可调用 `POST /api/v1/system/retry-initialize` 重试；这个预检失败发生在 LightRAG 存储初始化之前，不要求重启进程。存储初始化本身失败时会尽力清理已建存储并标记必须重启，因为不能确认 LightRAG 内部连接池已完全释放。
 
-模型任务启动前，会验证已登记原件的哈希及来源/当期归档日志的位置，然后对账当前 ready 修订的 Core 文档记录。已确认缺失的文档会自动排队重索引；对账读失败不会视为数据不存在，需检查数据库/Vault并用“重连服务”重试。文件日志重放和 Wiki 扫描保持独立运行。服务卡或 `GET /api/v1/system/reconciliation` 显示最近一次检查，修复进度仍看来源索引任务。完整工作区重建和备份恢复演练尚未完成。
+模型任务启动前，会验证已登记原件的哈希及来源/当期归档日志的位置，然后对账当前 ready 修订的 Core 文档记录。已确认缺失的文档会自动排队重索引；对账读失败不会视为数据不存在，需检查数据库/Vault并用“重连服务”重试。文件日志重放和 Wiki 扫描保持独立运行。服务卡或 `GET /api/v1/system/reconciliation` 显示最近一次检查，修复进度仍看来源索引任务。完整工作区重建尚未完成。完整数据库与 Vault 备份已有同机隔离恢复演练，离线步骤见 [备份与恢复](backup-and-restore.md)，实际证据见 [恢复验收](verification/m5-backup-restore-2026-10-03.md)；这不等于新机器安装或 Docker 验收。
 
 健康检查：
 
