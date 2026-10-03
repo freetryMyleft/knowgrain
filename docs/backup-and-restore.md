@@ -42,7 +42,7 @@ KG_APP_DB="knowgrain"
 KG_RAG_DB="lightrag"
 KG_BACKUP_DIR="/Volumes/OfflineDisk/KnowgrainBackups"
 KG_LR_WORKING_DIR="/absolute/path/to/data/lightrag"
-KG_LR_WORKSPACE="knowgrain"  # 填写运行实例实际 PG_WORKSPACE；自定义覆盖时先核对，不猜默认值。
+KG_LR_WORKSPACE="knowgrain"  # 填写存储实际 workspace；POSTGRES_WORKSPACE 可覆盖构造值。
 KG_LLM_MODEL="qwen3.6:35b"
 KG_EMBEDDING_MODEL="qwen3-embedding:0.6b"
 KG_EMBEDDING_DIM="1024"
@@ -68,7 +68,7 @@ PY
 
 ```
 
-`KG_APP_DB` 对应 `KNOWGRAIN_POSTGRES_DB`；`KG_RAG_DB` 对应 `POSTGRES_DATABASE`。`KG_LR_WORKSPACE` 必须填原实例实际写入 LightRAG Postgres 的 workspace；上游 `PG_WORKSPACE` 若已设置，会覆盖 `LIGHTRAG_WORKSPACE` 的构造值，所以自定义覆盖时先从实际运行配置/日志核对，不能根据默认值猜测。如实际运行时用了不同数据库名、模型、维度、workspace 或路径，必须照实填写。不要使用 `PGPASSWORD`、明文命令参数或 `source .env`。
+`KG_APP_DB` 对应 `KNOWGRAIN_POSTGRES_DB`；`KG_RAG_DB` 对应 `POSTGRES_DATABASE`。`KG_LR_WORKSPACE` 必须填原实例实际写入 LightRAG Postgres 的 workspace。固定版上游实际读取 `POSTGRES_WORKSPACE`，日志将其称为 `PG_WORKSPACE`；自定义覆盖时先从实际运行配置/日志核对，不能根据默认值猜测。新运行时会将这两个值明确绑定到 Core 身份。如实际运行时用了不同数据库名、模型、维度、workspace 或路径，必须照实填写。不要使用 `PGPASSWORD`、明文命令参数或 `source .env`。
 
 PG 客户端统一从已有且权限受限的密码文件读取认证（例如权限为 0600 的 .pgpass）；文件需包含实际 host/port、数据库名和用户的匹配凭据。它只留在本机凭据位置，不复制进备份或元数据，也不改宿主机全局配置。确认文件是普通文件且组/其他用户不可读后再继续；下方的 -w 在缺少匹配凭据时立即失败，不显示密码提示。
 
@@ -237,6 +237,7 @@ printf '%s\n' \
   "lightrag_working_dir=$KG_LR_WORKING_DIR" \
   "lightrag_workspace=$KG_LR_WORKSPACE" \
   "pg_workspace=$KG_LR_WORKSPACE" \
+  "postgres_workspace=$KG_LR_WORKSPACE" \
   "llm_model=$KG_LLM_MODEL" \
   "llm_context_size=$KG_LLM_CONTEXT_SIZE" \
   "ollama_host=$KG_OLLAMA_HOST" \
@@ -647,7 +648,7 @@ PY
 
 ### 2.5 启动隔离实例并验收
 
-恢复进程必须明确指向新数据库、新 Vault、新 working 目录和单独 API 端口。`POSTGRES_DATABASE` 是 RAG 库；`KNOWGRAIN_POSTGRES_DB` 是应用库。`VAULT_ROOT` 是初始候选值，但启动实际使用新应用库里的已更新绑定。恢复命令显式令 `PG_WORKSPACE` 等于备份记录的实际 workspace，避免 shell 中残留的旧覆盖值指向其他 LightRAG namespace。保留原 Embedding 模型名、`EMBEDDING_DIM`、模型上下文等值。`.env` 由 Pydantic 读取；不要 `source .env`。可在私有配置文件中编辑，或用进程管理器的环境注入覆盖，但不能把秘密写进命令行/代码。
+恢复进程必须明确指向新数据库、新 Vault、新 working 目录和单独 API 端口。`POSTGRES_DATABASE` 是 RAG 库；`KNOWGRAIN_POSTGRES_DB` 是应用库。`VAULT_ROOT` 是初始候选值，但启动实际使用新应用库里的已更新绑定。恢复命令显式令 `POSTGRES_WORKSPACE` 及 `PG_WORKSPACE` 等于备份记录的实际 workspace，避免 shell 中残留的旧覆盖值指向其他 LightRAG namespace。保留原 Embedding 模型名、`EMBEDDING_DIM`、模型上下文等值。`.env` 由 Pydantic 读取；不要 `source .env`。可在私有配置文件中编辑，或用进程管理器的环境注入覆盖，但不能把秘密写进命令行/代码。
 
 将以下非机密值设置为本次恢复的实际值，并确保服务端密码从已有受保护配置或凭据管理器读取：
 
@@ -662,6 +663,7 @@ export VAULT_PARENT_DIR="$KG_NEW_PARENT"
 export LIGHTRAG_WORKING_DIR="$KG_NEW_LR_WORKING_DIR"
 export LIGHTRAG_WORKSPACE="$(sed -n 's/^lightrag_workspace=//p' "$KG_BACKUP_RUN_DIR/recovery-metadata.txt")"
 export PG_WORKSPACE="$LIGHTRAG_WORKSPACE"
+export POSTGRES_WORKSPACE="$LIGHTRAG_WORKSPACE"
 export OLLAMA_HOST="$(sed -n 's/^ollama_host=//p' "$KG_BACKUP_RUN_DIR/recovery-metadata.txt")"
 export LLM_MODEL="$(sed -n 's/^llm_model=//p' "$KG_BACKUP_RUN_DIR/recovery-metadata.txt")"
 export LLM_CONTEXT_SIZE="$(sed -n 's/^llm_context_size=//p' "$KG_BACKUP_RUN_DIR/recovery-metadata.txt")"

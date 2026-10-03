@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Literal, Sequence
 from uuid import UUID
 
 from knowgrain.config import Settings
+from knowgrain.index_identity import CoreIndexIdentity
 from knowgrain.m3_types import Evidence
 
 QueryMode = Literal["local", "global", "hybrid", "mix", "naive"]
@@ -20,6 +21,7 @@ _MAX_ENTITY_NAME_LENGTH = 512
 _MAX_ENTITY_TYPE_LENGTH = 256
 _MAX_ENTITY_CHUNK_ID_LENGTH = 512
 _MAX_CLEANUP_CHUNKS = 10_000
+_POSTGRES_IDENTIFIER_MAX_LENGTH = 63
 _PARTIAL_STORAGE_ATTRIBUTES = (
     "full_docs",
     "text_chunks",
@@ -39,8 +41,17 @@ _PARTIAL_STORAGE_ATTRIBUTES = (
 class LightRAGRuntime:
     """Own one embedded LightRAG instance for the lifetime of one event loop."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        index_identity: CoreIndexIdentity | None = None,
+    ) -> None:
         self._settings = settings
+        if index_identity is not None and not isinstance(index_identity, CoreIndexIdentity):
+            raise TypeError("index_identity must be a CoreIndexIdentity")
+        self._uses_default_index_identity = index_identity is None
+        self._index_identity = index_identity or CoreIndexIdentity.from_settings(settings)
         self._rag: Any | None = None
         self._partial_rag: Any | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -54,6 +65,10 @@ class LightRAGRuntime:
     @property
     def is_ready(self) -> bool:
         return self._rag is not None
+
+    @property
+    def index_identity(self) -> CoreIndexIdentity:
+        return self._index_identity
 
     @property
     def restart_required(self) -> bool:
@@ -151,12 +166,17 @@ class LightRAGRuntime:
         }
 
     async def _start_unlocked(self) -> None:
+        if self._uses_default_index_identity:
+            self._validate_legacy_workspace_configuration()
+
         postgres_ready, postgres_detail = await self._probe_postgres()
         if not postgres_ready:
             raise RuntimeError(postgres_detail or "PostgreSQL check failed")
 
         # LightRAG loads its storage configuration while its modules are imported.
-        self._settings.configure_lightrag_environment()
+        self._settings.configure_lightrag_environment(
+            workspace=self._index_identity.workspace
+        )
         from knowgrain.tokenizer_cache import require_tokenizer_cache
 
         require_tokenizer_cache(self._settings.tokenizer_cache_dir)
@@ -166,12 +186,17 @@ class LightRAGRuntime:
         from lightrag.llm.ollama import ollama_embed, ollama_model_complete
         from lightrag.utils import EmbeddingFunc
 
-        working_dir: Path = self._settings.lightrag_working_dir
+        self._validate_vector_table_name_lengths()
+        working_dir: Path = self._index_identity.working_dir
         working_dir.mkdir(parents=True, exist_ok=True)
+
+        embedding_options: dict[str, Any] = {}
+        if self._index_identity.vector_model_name is not None:
+            embedding_options["model_name"] = self._index_identity.vector_model_name
 
         rag = LightRAG(
             working_dir=str(working_dir),
-            workspace=self._settings.lightrag_workspace,
+            workspace=self._index_identity.workspace,
             kv_storage="PGKVStorage",
             vector_storage="PGVectorStorage",
             graph_storage="PGTableGraphStorage",
@@ -186,6 +211,7 @@ class LightRAGRuntime:
             embedding_func=EmbeddingFunc(
                 embedding_dim=self._settings.embedding_dim,
                 max_token_size=self._settings.embedding_max_token_size,
+                **embedding_options,
                 func=partial(
                     ollama_embed.func,
                     embed_model=self._settings.embedding_model,
@@ -195,9 +221,10 @@ class LightRAGRuntime:
         )
         try:
             await rag.initialize_storages()
+            self._assert_storage_workspaces(rag)
         except BaseException as initialization_error:
             self._restart_required_detail = (
-                "LightRAG storage initialization failed "
+                "LightRAG storage initialization or identity validation failed "
                 f"({type(initialization_error).__name__}); restart the Knowgrain process "
                 "before retrying, even if best-effort cleanup succeeds"
             )
@@ -212,6 +239,71 @@ class LightRAGRuntime:
                 raise asyncio.CancelledError from initialization_error
             raise
         self._rag = rag
+
+    def _validate_legacy_workspace_configuration(self) -> None:
+        """Reject a legacy override before pinning the default index identity."""
+        # Configure connection values before importing Core: its modules load
+        # .env on import. Leave workspace untouched until the upstream resolver
+        # has read POSTGRES_WORKSPACE and config.ini using its own precedence.
+        self._settings.configure_lightrag_database_environment()
+        from lightrag.kg.postgres_impl import ClientManager
+
+        # get_config reads config.ini on each call; no cached client or storage
+        # is constructed here. Only inspect workspace, never log the config.
+        legacy_workspace = ClientManager.get_config()["workspace"]
+        if legacy_workspace and legacy_workspace != self._index_identity.workspace:
+            raise ValueError(
+                "LIGHTRAG_WORKSPACE conflicts with POSTGRES_WORKSPACE "
+                "(or config.ini [postgres] workspace); configure both to the "
+                "same existing workspace before starting Knowgrain"
+            )
+
+    def _validate_vector_table_name_lengths(self) -> None:
+        """Fail before constructing Core if its target vector tables exceed PG limits."""
+        model_name = self._index_identity.vector_model_name
+        if model_name is None:
+            return
+
+        from lightrag.kg.postgres_impl import namespace_to_table_name
+        from lightrag.namespace import NameSpace
+
+        suffix = f"{model_name}_{self._settings.embedding_dim}d"
+        namespaces = (
+            NameSpace.VECTOR_STORE_ENTITIES,
+            NameSpace.VECTOR_STORE_RELATIONSHIPS,
+            NameSpace.VECTOR_STORE_CHUNKS,
+        )
+        for namespace in namespaces:
+            base_name = namespace_to_table_name(namespace)
+            if not isinstance(base_name, str):
+                raise RuntimeError(f"LightRAG has no PostgreSQL table for {namespace}")
+            table_name = f"{base_name}_{suffix}"
+            if len(table_name) > _POSTGRES_IDENTIFIER_MAX_LENGTH:
+                raise ValueError(
+                    "Embedding dimension makes LightRAG vector table "
+                    f"{table_name!r} exceed PostgreSQL's "
+                    f"{_POSTGRES_IDENTIFIER_MAX_LENGTH}-character identifier limit"
+                )
+
+    def _assert_storage_workspaces(self, rag: Any) -> None:
+        """Require every initialized Core storage to retain the selected workspace."""
+        missing = object()
+        invalid_storages: list[str] = []
+        for attribute in _PARTIAL_STORAGE_ATTRIBUTES:
+            storage = getattr(rag, attribute, missing)
+            if storage is missing:
+                invalid_storages.append(f"{attribute} (missing storage)")
+                continue
+            workspace = getattr(storage, "workspace", missing)
+            if workspace is missing:
+                invalid_storages.append(f"{attribute} (missing workspace)")
+            elif workspace != self._index_identity.workspace:
+                invalid_storages.append(f"{attribute} (workspace mismatch)")
+        if invalid_storages:
+            raise RuntimeError(
+                "LightRAG storage identity validation failed for: "
+                + ", ".join(invalid_storages)
+            )
 
     async def _finalize_partial_storages(self, rag: Any) -> tuple[list[str], bool]:
         """Finalize the storage fields initialized by LightRAG 1.5.7 one by one."""

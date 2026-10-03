@@ -100,6 +100,8 @@ make demo
 
 模型任务启动前，会验证已登记原件的哈希及来源/当期归档日志的位置，然后对账当前 ready 修订的 Core 文档记录。已确认缺失的文档会自动排队重索引；对账读失败不会视为数据不存在，需检查数据库/Vault并用“重连服务”重试。文件日志重放和 Wiki 扫描保持独立运行。服务卡或 `GET /api/v1/system/reconciliation` 显示最近一次检查，修复进度仍看来源索引任务。完整工作区重建尚未完成。完整数据库与 Vault 备份已有同机隔离恢复演练，离线步骤见 [备份与恢复](backup-and-restore.md)，实际证据见 [恢复验收](verification/m5-backup-restore-2026-10-03.md)；这不等于新机器安装或 Docker 验收。
 
+旧安装升级时核对实际工作区：固定版LightRAG读取 `POSTGRES_WORKSPACE`（日志称为 `PG_WORKSPACE`），也可能读取 `config.ini` 的 `[postgres] workspace`。它们与 `LIGHTRAG_WORKSPACE` 不同时，新默认运行时明确拒绝启动Core；先将配置同步到原实例实际使用的 namespace，再重启 API。Settings 与默认索引身份在应用构造时固定，“重连服务”不会重新读取 `.env`。不要更改工作区名来绕过故障。现有默认入口仍保留旧无后缀向量表，内部显式目标身份已验证；[身份验收](verification/m5-core-identity-2026-10-03.md) 不代表全量重建按钮已上线。
+
 健康检查：
 
 ```sh

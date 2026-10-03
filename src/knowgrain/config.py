@@ -38,8 +38,19 @@ class Settings(BaseSettings):
     lightrag_working_dir: Path = Path("./data/lightrag")
     lightrag_workspace: str = "knowgrain"
 
-    def configure_lightrag_environment(self) -> None:
+    def configure_lightrag_environment(self, *, workspace: str | None = None) -> None:
         """Set the PostgreSQL variables consumed by LightRAG Core before importing it."""
+        import os
+
+        self.configure_lightrag_database_environment()
+        selected_workspace = self.lightrag_workspace if workspace is None else workspace
+        # LightRAG 1.5.7 reads POSTGRES_WORKSPACE but labels it PG_WORKSPACE in
+        # logs. Pin the actual setting and documented alias to the same value.
+        os.environ["PG_WORKSPACE"] = selected_workspace
+        os.environ["POSTGRES_WORKSPACE"] = selected_workspace
+
+    def configure_lightrag_database_environment(self) -> None:
+        """Set connection values without changing the legacy workspace override."""
         import os
 
         os.environ["POSTGRES_HOST"] = self.postgres_host
