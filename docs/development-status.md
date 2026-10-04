@@ -98,7 +98,7 @@ Full objective: M0 through M6 in architecture-and-development-plan.md and the at
 
 - Implemented: same-loop admission/counting for all seven Core entry points, concurrent reads and draining queued writes, retained concurrent close task, sticky restart requirement on caller timeout/cancellation, and immutable Core/epoch close proof. Strict pinned shutdown flushes vectors before model queues, joins the saved parser executor and checks all twelve distinct storage finalizers, ownership, pending buffers and actual pool/holder release. No shared-state reset or automatic generation switching is provided.
 - Verified: 102 relevant checks passed; independent Python/general reviews approved. Actual restored PostgreSQL/Core protected an admitted entity read and the original parser executor until completion, rejected new reads, released queues/storages/pool, retained the same proof on repeated close, and preserved all eighteen file hashes. The native thread is a controlled fixture, not large-document parser acceptance. See [close verification](verification/m5-core-close-2026-10-03.md).
-- Remaining: application-wide persistent restart latch, full index profile, generation ledger, strict target audit, rebuild execution and Web workflow. Existing running8787 process has not loaded this code until its next restart.
+- Remaining: application-wide persistent restart latch, full index profile, generation ledger, strict target audit, rebuild execution and Web workflow. On2026-10-04 the former8787 handle and listener were confirmed absent; API restarted with its existing database/Vault/models, loaded this node and returned all-ready/complete reconciliation. This does not claim automatic generation switching.
 
 ## Remaining scope
 

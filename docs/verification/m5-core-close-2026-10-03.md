@@ -38,4 +38,8 @@ Luna 使用 `gpt-6-luna` / `xhigh` 实现并通过62项重点检查、编译和 
 
 脚本最后 stdout 的 `close_succeeded` 为 false，原因是将 `asdict()` 保留的空 tuple 与空 list 比较；此前直接检查 `CoreCloseProof.succeeded` 已通过，保存的六项标志和空错误亦证明成功。该显示错误不是生产代码释放失败。
 
+后续将临时脚本摘要直接读取 `final_proof.succeeded`，重新运行同一只读验收，退出0，stdout `close_succeeded: true`。新证明位于 `/private/var/folders/s4/t2mnvcrn6bj30rbbpjbqd5g40000gn/T/knowgrain-close-20261003.jd0088cr/proof.json`，日志 `/tmp/knowgrain-core-close-acceptance-final.log`；六项标志、空错误和十八份哈希再次一致。未修改生产代码以修复脚本显示。
+
+2026-10-04 继续工作时，原8787执行句柄76532已不存在、端口未监听，确认进程缺失后按原配置恢复 API。现执行句柄56692，日志 `/tmp/knowgrain-m5-acceptance.TBHydm/core-close-node-api.log`；就绪字段全部 ready、reconciliation complete。新进程加载本节点代码；不是因观察超时重复启动仍运行的实例。
+
 本次有真实数据库读取、真实 Core/队列/pool 和真实 executor 线程，但受控线程不是大型文件 native parser 验收；没有模拟物理断电。没有新增 Web 操作、迁移、依赖或前端改动。Docker/PG18、新机器安装、完整重建、完整图谱与 M6 尚未验收。

@@ -88,7 +88,7 @@ flowchart LR
 
 ### 嵌入式 Core 的实施边界
 
-后端启动时先加载 `POSTGRES_*` 连接信息和模型配置，验证 Ollama 的 LLM/Embedding 可用性与向量维度，再构造 `LightRAG`。构造参数明确指定四种 PostgreSQL 存储、`working_dir`、`llm_model_func`、`embedding_func`，而非使用默认的 JSON/NetworkX/NanoVectorDB 存储。随后在同一事件循环执行 `initialize_storages()`；关闭应用前停止领取新任务，等待或记录在途作业，再执行 `finalize_storages()`。应用只通过自有 `LightragCoreAdapter` 暴露 `index(revision, text)`、`retrieve(question)`、`delete(revision)` 等业务方法。
+后端启动时先加载 `POSTGRES_*` 连接信息和模型配置，验证 Ollama 的 LLM/Embedding 可用性与向量维度，再构造 `LightRAG`。构造参数明确指定四种 PostgreSQL 存储、`working_dir`、`llm_model_func`、`embedding_func`，而非使用默认的 JSON/NetworkX/NanoVectorDB 存储。随后在同一事件循环执行 `initialize_storages()`。关闭应用前停止领取新任务，由调用门禁排空已进入的 Core 读写，先落盘向量缓冲，再关闭模型队列和等待解析线程，逐个释放十二个存储并核验 pool/引用；上游 `finalize_storages()` 会捕获失败，不能单独作为成功证明。实际适配由 `LightRAGRuntime` 和 `core_lifecycle.py` 承担，验证见 [Core 关闭验收](verification/m5-core-close-2026-10-03.md)。应用只通过自有适配层暴露索引、检索和删除等业务方法。
 
 ```text
 Vault 原件 → 本地解析器 → index(revision_id, text, vault_path)
