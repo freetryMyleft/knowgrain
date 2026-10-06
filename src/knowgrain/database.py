@@ -19,7 +19,7 @@ from knowgrain.models import (
 )
 
 
-EXPECTED_SCHEMA_REVISION = "0012_source_file_operations"
+EXPECTED_SCHEMA_REVISION = "0013_core_generations"
 _VAULT_BINDING_LOCK_KEYS = (1263420247, 1196575049)
 
 

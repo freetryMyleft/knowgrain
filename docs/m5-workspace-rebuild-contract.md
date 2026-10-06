@@ -2,6 +2,8 @@
 
 状态：设计与分工契约，尚未交付完整重建 API、执行器或 Web 操作。运行时身份基础另行验收；不能据此宣布 M5 完成。
 
+内部 D1 账本与事务仓储已实现，迁移为 `0013_core_generations`。普通任务围栏、真实协调者排空、严格审计和激活尚未接入；细节及边界见 [账本契约](core-generation-ledger.md)。
+
 ## 1. 用户流程与验收范围
 
 用户在 Web 发起“从原件重建索引”，查看范围和模型配置后确认。系统暂停来源修改和模型任务，从 Vault 安全读取每个活跃来源的最新修订，在全新的 LightRAG 工作区建立向量、实体和关系。全部来源验证通过后，一次性激活新工作区，再开放问答和生成。
@@ -43,7 +45,7 @@
 
 内部 `IndexProfile` 基础已实现：从实际 Core 和独立回调工厂捕获只读快照，分别计算内容/Embedding、图谱写入、LLM 和完整快照指纹。图谱写入指纹包含实际 extract LLM、采样、解析后的提示词、语言及摘要/成员限制；不能仅以 Embedding 指纹一致证明同一目标可续建。规范 JSON 含服务端解析后的提示词文本和服务地址，不向浏览器或 Vault 发布；公开信息使用 `public_summary()`。未知模型版本显式保留 unavailable。详见 [配置快照契约](index-profile.md)。
 
-该模块当前仅支持本地解析后 `ainsert(rawtext)`、空 process_options、固定 tokenizer 与 legacy token chunker；不是保存对象后自动恢复 Core 的构造器。协调者接入时必须从封存配置构造真实回调/参数、验证外部实现和模型版本，并在初始化及写入前比较实际快照。现有普通 Runtime 尚未接入；代账本、冻结及重建执行器仍待实现。
+该模块当前仅支持本地解析后 `ainsert(rawtext)`、空 process_options、固定 tokenizer 与 legacy token chunker；不是保存对象后自动恢复 Core 的构造器。协调者接入时必须从封存配置构造真实回调/参数、验证外部实现和模型版本，并在初始化及写入前比较实际快照。代账本和事务冻结已作为内部基础实现；现有普通 Runtime 尚未接入，实际协调与重建执行器仍待实现。
 
 先定义服务端独立 `llm`/`embedding` 角色配置和回调工厂：支持默认 Ollama、第三方服务及两者混用；实际实现文档/查询前缀，不只保存字段。目标从封存规范配置构造回调，密钥从服务端配置解析。规范配置包含实际生效的 parser 版本、tokenizer、分块 options、Embedding token 限制及上游环境默认项。重启时配置不匹配则保持冻结、报告需恢复的配置，不能用当前 Settings 的另一个模型继续同目标。
 
@@ -53,11 +55,11 @@
 
 ## 4. 持久化领域模型
 
-使用专用重建操作和条目，不以复用普通索引 Job 代替重建日志。具体迁移名称在实现时确定。
+使用专用重建操作和条目，不以复用普通索引 Job 代替重建日志。内部账本迁移为 `0013_core_generations`；后续生产接入仍需按本契约验收。
 
 | 模型 | 必需字段和约束 |
 | --- | --- |
-| `CoreGeneration` | UUID；唯一 workspace、vector token；配置指纹及规范配置；独立 working 身份；legacy/verified 状态；创建/激活/退役时间。 |
+| `CoreGeneration` | UUID；唯一 workspace、vector token；配置指纹及规范配置；独立 working 身份；配置状态 `legacy_unverified` / `sealed`；创建/激活/退役时间。配置封存不代表数据核验通过。 |
 | `CoreSelector` | 单例 id=1；单调 CAS version；独立单调 execution_epoch；active generation；pending rebuild；冻结状态。初始化单例使用事务锁序列化。 |
 | `RebuildOperation` | 稳定 UUID；旧/目标代；请求幂等键；预期 selector version；Vault binding 身份；状态、版本、快照摘要、错误、本次认领 token/fence、操作租约与时间。目标代只能属于这一操作。 |
 | `RebuildItem` | operation/source 和 operation/revision 唯一；准确 revision/source 复合外键；生命周期、路径、原件哈希、原解析元数据快照；状态、attempts、本次认领 token/fence 和租约；目标清理块清单和解析结果。 |
