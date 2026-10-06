@@ -37,9 +37,13 @@
 
 默认旧安装在 pin 之前使用固定版上游配置解析器读取有效覆盖值（环境变量优先，其次 `config.ini`）。与 `LIGHTRAG_WORKSPACE` 不一致时在数据库/模型/存储初始化前明确拒绝，提示使用原工作区同步配置。显式指定的目标身份才允许覆盖环境，不静默将旧安装切到另一个 namespace。
 
-### 3.2 Embedding 配置指纹
+### 3.2 完整索引配置快照与分类指纹
 
 持久化完整的规范配置和 SHA-256：provider、规范服务地址、model、维度、文档/查询前缀、实际解析器/分块配置以及可获得的模型版本摘要。密钥不进入指纹明文、API 或 Vault。LLM 信息单独记录，改变 LLM 不伪装成 Embedding 等价。
+
+内部 `IndexProfile` 基础已实现：从实际 Core 和独立回调工厂捕获只读快照，分别计算内容/Embedding、图谱写入、LLM 和完整快照指纹。图谱写入指纹包含实际 extract LLM、采样、解析后的提示词、语言及摘要/成员限制；不能仅以 Embedding 指纹一致证明同一目标可续建。规范 JSON 含服务端解析后的提示词文本和服务地址，不向浏览器或 Vault 发布；公开信息使用 `public_summary()`。未知模型版本显式保留 unavailable。详见 [配置快照契约](index-profile.md)。
+
+该模块当前仅支持本地解析后 `ainsert(rawtext)`、空 process_options、固定 tokenizer 与 legacy token chunker；不是保存对象后自动恢复 Core 的构造器。协调者接入时必须从封存配置构造真实回调/参数、验证外部实现和模型版本，并在初始化及写入前比较实际快照。现有普通 Runtime 尚未接入；代账本、冻结及重建执行器仍待实现。
 
 先定义服务端独立 `llm`/`embedding` 角色配置和回调工厂：支持默认 Ollama、第三方服务及两者混用；实际实现文档/查询前缀，不只保存字段。目标从封存规范配置构造回调，密钥从服务端配置解析。规范配置包含实际生效的 parser 版本、tokenizer、分块 options、Embedding token 限制及上游环境默认项。重启时配置不匹配则保持冻结、报告需恢复的配置，不能用当前 Settings 的另一个模型继续同目标。
 
@@ -54,7 +58,7 @@
 | 模型 | 必需字段和约束 |
 | --- | --- |
 | `CoreGeneration` | UUID；唯一 workspace、vector token；配置指纹及规范配置；独立 working 身份；legacy/verified 状态；创建/激活/退役时间。 |
-| `CoreSelector` | 单例 id=1；单调 version；active generation；pending rebuild；冻结状态。初始化单例使用事务锁序列化。 |
+| `CoreSelector` | 单例 id=1；单调 CAS version；独立单调 execution_epoch；active generation；pending rebuild；冻结状态。初始化单例使用事务锁序列化。 |
 | `RebuildOperation` | 稳定 UUID；旧/目标代；请求幂等键；预期 selector version；Vault binding 身份；状态、版本、快照摘要、错误、本次认领 token/fence、操作租约与时间。目标代只能属于这一操作。 |
 | `RebuildItem` | operation/source 和 operation/revision 唯一；准确 revision/source 复合外键；生命周期、路径、原件哈希、原解析元数据快照；状态、attempts、本次认领 token/fence 和租约；目标清理块清单和解析结果。 |
 | `CoreGenerationRevision` | generation/revision 唯一；写入意图及 indexing/failed/verified/cleaned 状态；实际解析哈希、持久清理块清单、物理索引和核验时间。Core 写入前登记意图，不能只登记核验成功的成员。 |
@@ -95,6 +99,7 @@ failed → preparing/building（显式重试，同目标代）
 - 统一锁顺序：selector → operation → source（UUID排序）→ 普通 Job → maintenance → file operation → revision → rebuild item/member。禁止反向获取 selector；普通写入在锁 source 之前获取短期 selector 围栏。
 - Freeze 的检查需要和来源写入共享事务围栏，不能仅检查浏览器请求到达时的内存布尔值。
 - 准备阶段仅允许已持有旧代租约的任务排空；快照封存后旧租约不能更新来源派生状态。新 claim 和请求始终拒绝。
+- selector 的请求 CAS version 与执行 execution_epoch 分开：接收重建改变 version，但 preparing 仍允许既有有效 grant 排空；快照封存后递增 execution_epoch，使旧 grant 全部失效。不能用 selector.version 相等作为唯一执行资格。普通短事务先取得 selector `FOR SHARE`，重建转换使用 `FOR UPDATE`；`FOR KEY SHARE` 不足以阻止冻结字段更新。
 - Core 方法需要调用入口与关闭排空保护，覆盖 HTTP 实体导航等直接读取，不能只停止后台任务后立即释放存储。
 - 启动顺序为应用库 → selector/pending/config → Vault → 选定唯一 Core → 对应执行器。pending 存在时只恢复目标操作，不先启动普通 file/model/reconciliation runner；`retry-initialize` 和 Vault 切换同样受冻结围栏。重建接收入口不要求损坏旧 Core ready；旧部分初始化无法确认释放时，持久化操作后要求进程重启。激活提交前预装目标服务引用，提交后再开放入口；旧/目标引用不能由不完整的 `_install_vault` 更换代替。
 - 激活保留来源生命周期、修订 UUID 和原件 SHA。解析文本和定位契约未变时保留 `indexed_at` 与证据；解析文本或 segment 定位契约改变时显式使旧证据失去当前资格，历史证据仍保留，不静默重写已发布定位。
@@ -102,6 +107,7 @@ failed → preparing/building（显式重试，同目标代）
 - 新的来源删除清理所有可能写入 active 代的修订，包括 indexing/failed 的写入意图，不能只检查已核验成员。Trash 前置条件依据“从未分配该代写入”或“该代的当期清理及严格不存在检查确实完成”。仅没有 verified member 不能证明 Core 没有部分写入；旧代退役不算清理成功，旧代未激活数据不阻止权威原件归档。
 - 恢复来源即使旧修订标记 ready，只要它不属于 active 代也必须重新索引，current=None。
 - 新问答、生成、实体/关系导航的资格同时要求 active 代成员已核验；旧历史读取继续显示准确证据和重新计算的 freshness。
+- 围栏覆盖检索及最终发布事务，包括 `GenerationRepository._assert_current_evidence`（问答/审阅也复用）、来源/维护/文件日志、实体导航和 Wiki 发布。先定义共享代资格谓词与完整 ExecutionGrant，再传递至各入口，不能只修改 provenance 仓储。运行器调用 Core 前还要核验 grant 的代与实际挂载 Core 一致。
 
 ## 7. API 和 Web 契约
 
@@ -156,3 +162,5 @@ Sol 维护本契约、跨模块接口和最终集成。
 6. 后端接口稳定后 Luna F：Web 操作与进度、相邻类型和契约测试。
 
 每个可验收节点检查实际 diff 和风险相关测试，独立审查后提交并尝试推送。若只完成内部基础，状态须明确为基础完成、完整用户流程待验收。
+
+2026-10-06 architect 确认 D 的实现边界：先实现尚未被生产 Runtime 使用的完整账本、迁移、仓储、事务围栏和真实 PostgreSQL 检查；不得在局部围栏完成时启用 selector 或重建入口。首个运行时接入节点必须同时覆盖普通索引/维护/文件/证据 grant、写入意图、归档/恢复规则和 selector-aware 启动。旧索引回填为 legacy_unverified，不凭 ready/Job succeeded 生成 verified member；相同文本但页/heading/segment 定位变化必须使当前证据失效。
