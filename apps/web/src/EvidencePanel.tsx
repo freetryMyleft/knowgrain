@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { X } from '@phosphor-icons/react/dist/csr/X'
 import { isEvidenceDetail } from './generation-contract'
 import type { EvidenceDetail } from './generation-contract'
 import './question.css'
@@ -60,7 +61,7 @@ export default function EvidencePanel({ evidenceId, onClose }: { evidenceId: str
   }
 
   return <dialog ref={dialog} className="evidence-dialog" aria-labelledby="evidence-title" onCancel={onClose}>
-    <header><div><small>原文证据</small><h2 id="evidence-title">{detail?.filename || '正在读取证据…'}</h2></div><button type="button" className="quiet-button" onClick={onClose} aria-label="关闭原文证据">×</button></header>
+    <header><div><small>原文证据</small><h2 id="evidence-title">{detail?.filename || '正在读取证据…'}</h2></div><button type="button" className="quiet-button" onClick={onClose} aria-label="关闭原文证据"><X aria-hidden="true" size={16} weight="regular" /></button></header>
     {error && <p className="question-error" role="alert">{error}</p>}
     {detail && <>
       <p className={`evidence-freshness ${detail.current ? '' : 'stale'}`} role="status">{detail.current ? '与当前有效修订一致' : '历史证据：已过期或原件暂时无法核实，不可用于新答案'}</p>
@@ -70,7 +71,7 @@ export default function EvidencePanel({ evidenceId, onClose }: { evidenceId: str
         <div><dt>原件 SHA-256</dt><dd>{detail.source_sha256}</dd></div>
         <div><dt>摘录 SHA-256</dt><dd>{detail.excerpt_sha256}</dd></div>
         <div><dt>索引时间</dt><dd>{evidenceDate(detail.indexed_at)}</dd></div>
-        <div><dt>原文位置</dt><dd>字符 {detail.start}–{detail.end}{detail.page ? ` · 第 ${detail.page} 页` : ''}{detail.heading ? ` · ${detail.heading}` : ''}</dd></div>
+        <div><dt>原文位置</dt><dd>字符 {detail.start}-{detail.end}{detail.page ? ` · 第 ${detail.page} 页` : ''}{detail.heading ? ` · ${detail.heading}` : ''}</dd></div>
         <div><dt>Vault 原件</dt><dd>{detail.vault_path}</dd></div>
       </dl>
       <div className="evidence-downloads"><button type="button" className="primary-button" disabled={busy !== null} onClick={() => void downloadFile('original')}>{busy === 'original' ? '正在核对原件…' : '下载准确修订原件'}</button><button type="button" className="quiet-button" disabled={busy !== null} onClick={() => void downloadFile('markdown')}>{busy === 'markdown' ? '正在核对摘录…' : '下载证据 Markdown'}</button></div>

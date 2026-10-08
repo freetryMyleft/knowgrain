@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ArrowSquareOut } from '@phosphor-icons/react/dist/csr/ArrowSquareOut'
 import EvidencePanel from './EvidencePanel'
 import { generationErrorMessage } from './generation-contract'
 import { isPageEntities, isEntityPages } from './entity-contract'
@@ -43,7 +44,7 @@ function EntityWikiLinks({ entity, onOpenPage, onEvidence }: {
     {error ? <p className="wiki-inline-error">{error}</p> : !data ? <p className="wiki-muted-line">正在核对页面与来源…</p> : <>
       {data.pages.length === 0 && <p className="wiki-muted-line">没有通过当前版本校验的 Wiki 页面。</p>}
       {data.pages.map(page => <article className="entity-linked-page" key={page.page_id}>
-        <button type="button" className="entity-page-open" onClick={() => onOpenPage(page.page_id)}><strong>{page.title.length > 200 ? `${page.title.slice(0, 200)}…` : page.title} ↗</strong><small>{page.vault_path.length > 512 ? `${page.vault_path.slice(0, 512)}…` : page.vault_path}</small></button>
+        <button type="button" className="entity-page-open" onClick={() => onOpenPage(page.page_id)}><strong>{page.title.length > 200 ? `${page.title.slice(0, 200)}…` : page.title} <ArrowSquareOut aria-hidden="true" size={14} weight="regular" /></strong><small>{page.vault_path.length > 512 ? `${page.vault_path.slice(0, 512)}…` : page.vault_path}</small></button>
         <div className="entity-evidence-actions">{page.evidence_ids.map((id, index) => <button type="button" className="text-action" key={id} onClick={() => onEvidence(id)}>原文证据 {index + 1}</button>)}</div>
       </article>)}
       {data.truncated && <p className="wiki-muted-line">已达到候选页面上限；此列表不是完整关联集合。</p>}

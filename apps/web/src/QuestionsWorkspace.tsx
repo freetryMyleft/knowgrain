@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { ArrowSquareOut } from '@phosphor-icons/react/dist/csr/ArrowSquareOut'
 import type { FormEvent } from 'react'
 import EvidencePanel, { evidenceDate } from './EvidencePanel'
 import { isQueryJob, isQueryList, queryStateLabel } from './question-contract'
@@ -10,7 +11,7 @@ async function api(path: string, signal?: AbortSignal, body?: Record<string, unk
     signal, method: body ? 'POST' : 'GET',
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
   })
-  if (!response.ok) throw new Error(response.status === 503 ? '问答服务暂不可用，请检查本机服务后重试。' : response.status === 409 ? '任务状态已变化，请刷新后重试。' : response.status === 422 ? '问题格式不符合要求，请输入 1–1000 个字符。' : '请求失败，请重试。')
+  if (!response.ok) throw new Error(response.status === 503 ? '问答服务暂不可用，请检查本机服务后重试。' : response.status === 409 ? '任务状态已变化，请刷新后重试。' : response.status === 422 ? '问题格式不符合要求，请输入 1-1000 个字符。' : '请求失败，请重试。')
   return response.json() as Promise<unknown>
 }
 
@@ -130,7 +131,7 @@ export default function QuestionsWorkspace({ onReturnToSources }: { onReturnToSo
               <div className="question-model">{result.model.name} · {result.model.provider} · {evidenceDate(result.model.generated_at)}</div>
               {result.status === 'insufficient' ? <p className="question-insufficient" role="status">{result.message}</p> : <>
                 {!result.evidence_current && <p className="question-error" role="status">这份回答包含历史证据，部分来源已变化或暂时无法核实。请重新提问获取当前答案。</p>}
-                <ol className="question-claims">{result.claims.map(item => <li key={item.key}><p>{item.text}</p><div>{item.evidence_ids.map(id => { const source = evidence.get(id); return source ? <button className="question-citation" type="button" key={id} onClick={() => setEvidenceId(id)}>{source.filename}<span>{source.current ? '查看原文' : '历史引文'} ↗</span></button> : null })}</div></li>)}</ol>
+                <ol className="question-claims">{result.claims.map(item => <li key={item.key}><p>{item.text}</p><div>{item.evidence_ids.map(id => { const source = evidence.get(id); return source ? <button className="question-citation" type="button" key={id} onClick={() => setEvidenceId(id)}>{source.filename}<span>{source.current ? '查看原文' : '历史引文'} <ArrowSquareOut aria-hidden="true" size={13} weight="regular" /></span></button> : null })}</div></li>)}</ol>
                 <div className="question-source-ledger"><h3>引用的修订</h3>{result.evidence.map(item => <div key={item.evidence_id}><button type="button" onClick={() => setEvidenceId(item.evidence_id)}>{item.filename}</button><code>{item.revision_id}</code><span>索引于 {evidenceDate(item.indexed_at)}</span></div>)}</div>
               </>}
             </>}

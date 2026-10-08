@@ -6,6 +6,11 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { markdown } from '@codemirror/lang-markdown'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { ArrowClockwise } from '@phosphor-icons/react/dist/csr/ArrowClockwise'
+import { ArrowSquareOut } from '@phosphor-icons/react/dist/csr/ArrowSquareOut'
+import { Plus } from '@phosphor-icons/react/dist/csr/Plus'
+import { WarningCircle } from '@phosphor-icons/react/dist/csr/WarningCircle'
+import { X } from '@phosphor-icons/react/dist/csr/X'
 import {
   isBacklinkResponse,
   isConflictDetail,
@@ -153,10 +158,12 @@ function MarkdownEditor({ value, syncVersion, onChange }: { value: string; syncV
           if (update.docChanged) onChangeRef.current(update.state.doc.toString())
         }),
         EditorView.theme({
-          '&': { height: '100%', fontSize: '13px' },
+          '&': { height: '100%', fontSize: '13px', color: 'var(--text-primary)', backgroundColor: 'var(--surface-solid)' },
           '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', overflow: 'auto' },
-          '.cm-content': { padding: '16px 18px', minHeight: '100%' },
-          '.cm-gutters': { backgroundColor: '#f8f9fb', border: 'none', color: '#a3adbb' },
+          '.cm-content': { padding: '18px 20px', minHeight: '100%', caretColor: 'var(--accent)' },
+          '.cm-gutters': { backgroundColor: 'var(--surface-raised)', border: 'none', color: 'var(--subtle)' },
+          '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent-soft) 54%, transparent)' },
+          '.cm-activeLineGutter': { color: 'var(--accent-text)', backgroundColor: 'var(--accent-soft)' },
           '&.cm-focused': { outline: 'none' },
         }),
       ],
@@ -569,14 +576,14 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
         <section className="wiki-list-column" aria-label="Wiki 页面列表">
           <div className="wiki-list-toolbar">
             <div className="column-heading"><div className="column-kicker">知识库</div><h1>Wiki</h1></div>
-            <button type="button" className="icon-button" aria-label="刷新 Wiki" title="刷新" onClick={() => void loadList(pageIndex * PAGE_SIZE, undefined, true)}>↻</button>
-            <button type="button" className="primary-button compact" onClick={() => { setCreateError(null); setCreateOpen(true) }}>＋ 新建</button>
+            <button type="button" className="icon-button" aria-label="刷新 Wiki" title="刷新" onClick={() => void loadList(pageIndex * PAGE_SIZE, undefined, true)}><ArrowClockwise aria-hidden="true" size={17} weight="regular" /></button>
+            <button type="button" className="primary-button compact" onClick={() => { setCreateError(null); setCreateOpen(true) }}><Plus aria-hidden="true" size={15} weight="regular" />新建</button>
           </div>
           <div className="wiki-list-summary">第 {pageIndex + 1} 页 · {pages.length} 条页面</div>
           <div className="wiki-page-list" ref={listScrollRef} aria-live="polite" aria-busy={listLoading}>
             {listLoading && pages.length === 0 && <div className="list-loading"><span className="spinner" />正在读取 Wiki…</div>}
-            {!listLoading && listError && pages.length === 0 && <div className="list-state error-state"><div className="state-icon">!</div><strong>Wiki 暂时无法载入</strong><p>{listError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入</button></div>}
-            {!listLoading && !listError && pages.length === 0 && <div className="list-state empty-state"><div className="wiki-empty-icon">W</div><strong>还没有 Wiki 页面</strong><p>创建一篇 Markdown 页面，文件会保存在 Wiki/Drafts 中。</p><button type="button" className="primary-button compact" onClick={() => setCreateOpen(true)}>＋ 新建页面</button></div>}
+            {!listLoading && listError && pages.length === 0 && <div className="list-state error-state"><div className="state-icon"><WarningCircle aria-hidden="true" size={21} weight="regular" /></div><strong>Wiki 暂时无法载入</strong><p>{listError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入</button></div>}
+            {!listLoading && !listError && pages.length === 0 && <div className="list-state empty-state"><div className="wiki-empty-icon">W</div><strong>还没有 Wiki 页面</strong><p>创建一篇 Markdown 页面，文件会保存在 Wiki/Drafts 中。</p><button type="button" className="primary-button compact" onClick={() => setCreateOpen(true)}><Plus aria-hidden="true" size={15} weight="regular" />新建页面</button></div>}
             {pages.map((page) => <button key={page.page_id} type="button" className={`wiki-page-row ${selectedId === page.page_id ? 'selected' : ''}`} onClick={() => navigateToPage(page.page_id)} aria-pressed={selectedId === page.page_id}>
               <span className="wiki-file-icon">M</span><span className="wiki-row-copy"><strong title={page.title}>{page.title}</strong><span>{basename(page.vault_path)}</span><small>{formatDate(page.updated_at)}</small></span>
               <span className={`wiki-status-pill ${page.status}`}>{page.status === 'reviewed' ? '已审阅' : '草稿'}</span>
@@ -588,7 +595,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
         </section>
 
         <section className="wiki-detail" aria-label="Wiki 页面详情" aria-busy={detailLoading}>
-          {!selectedId ? <><div className="wiki-detail-empty"><div className="wiki-empty-icon">W</div><strong>选择一篇 Wiki 页面</strong><p>查看 Markdown、编辑正文并浏览反向链接。</p></div><WikiGenerationPanel page={null} dirty={dirty || saving || Boolean(conflict)} onOpenPage={(id) => { navigateToPage(id) }} onChanged={refreshGenerationContext} /></> : detailLoading && !baseDetail ? <div className="inspector-loading"><span className="spinner" />正在读取页面…</div> : detailError && !baseDetail ? <div className="wiki-detail-empty error-state"><div className="state-icon">!</div><strong>页面暂时无法载入</strong><p>{detailError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入列表</button></div> : current ? <>
+          {!selectedId ? <><div className="wiki-detail-empty"><div className="wiki-empty-icon">W</div><strong>选择一篇 Wiki 页面</strong><p>查看 Markdown、编辑正文并浏览反向链接。</p></div><WikiGenerationPanel page={null} dirty={dirty || saving || Boolean(conflict)} onOpenPage={(id) => { navigateToPage(id) }} onChanged={refreshGenerationContext} /></> : detailLoading && !baseDetail ? <div className="inspector-loading"><span className="spinner" />正在读取页面…</div> : detailError && !baseDetail ? <div className="wiki-detail-empty error-state"><div className="state-icon"><WarningCircle aria-hidden="true" size={21} weight="regular" /></div><strong>页面暂时无法载入</strong><p>{detailError}</p><button type="button" className="text-action" onClick={() => void loadList(pageIndex * PAGE_SIZE)}>重新载入列表</button></div> : current ? <>
         <div className="wiki-detail-head">
               <div className="wiki-page-heading"><div className="column-kicker">{current.status === 'reviewed' ? '已审阅页面' : '草稿页面'}</div><h2 title={current.title}>{current.title}</h2><div className="wiki-page-path mono">{current.vault_path}</div></div>
               <div className="wiki-detail-actions"><button type="button" className="secondary-button" onClick={() => void refreshSelected(current.page_id, undefined, true)}>刷新</button><button type="button" className="primary-button" onClick={() => void save()} disabled={!dirty || saving || Boolean(conflict)}>{saving ? '正在保存…' : '保存'}</button></div>
@@ -603,7 +610,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
               <div className="wiki-conflict-diff"><strong>版本差异</strong><pre>{conflict.diff || '服务端未提供差异内容。'}</pre></div>
               <div className="wiki-conflict-actions"><span>保存冲突不会覆盖 Vault 文件。</span><button type="button" className="secondary-button" onClick={reloadConflictVersion} disabled={!conflict.current}>载入服务器当前版本</button></div>
             </section>}
-            {notice && <div className="wiki-callout notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice(null)}>×</button></div>}
+            {notice && <div className="wiki-callout notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice(null)}><X aria-hidden="true" size={15} weight="regular" /></button></div>}
 
             <WikiGenerationPanel
               page={current}
@@ -621,7 +628,7 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
             <WikiEntityPanel key={`${current.page_id}:${current.content_sha256}`} pageId={current.page_id} contentHash={current.content_sha256} dirty={dirty || saving || Boolean(conflict)} onOpenPage={(id) => { navigateToPage(id) }} />
             <section className="wiki-backlinks" aria-labelledby="wiki-backlinks-title">
               <div className="wiki-section-title"><h3 id="wiki-backlinks-title">反向链接</h3><span>{backlinks.length}</span></div>
-              {backlinkError ? <p className="wiki-muted-line">反向链接暂时无法载入：{backlinkError}</p> : backlinks.length === 0 ? <p className="wiki-muted-line">还没有其他页面链接到这里。</p> : <div className="wiki-backlink-list">{backlinks.map((link, index) => <button key={`${link.page_id}-${link.line}-${index}`} type="button" onClick={() => navigateToPage(link.page_id)}><span className="wiki-backlink-arrow">↗</span><span><strong>{link.title}</strong><small>{link.vault_path} · 第 {link.line} 行{link.anchor ? ` · #${link.anchor}` : ''}</small></span></button>)}</div>}
+              {backlinkError ? <p className="wiki-muted-line">反向链接暂时无法载入：{backlinkError}</p> : backlinks.length === 0 ? <p className="wiki-muted-line">还没有其他页面链接到这里。</p> : <div className="wiki-backlink-list">{backlinks.map((link, index) => <button key={`${link.page_id}-${link.line}-${index}`} type="button" onClick={() => navigateToPage(link.page_id)}><span className="wiki-backlink-arrow"><ArrowSquareOut aria-hidden="true" size={14} weight="regular" /></span><span><strong>{link.title}</strong><small>{link.vault_path} · 第 {link.line} 行{link.anchor ? ` · #${link.anchor}` : ''}</small></span></button>)}</div>}
             </section>
           </> : null}
         </section>
@@ -631,6 +638,6 @@ export default function WikiWorkspace({ onReturnToSources }: { onReturnToSources
     </div>
     {evidenceId && <EvidencePanel evidenceId={evidenceId} onClose={() => setEvidenceId(null)} />}
 
-    {createOpen && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !creating) setCreateOpen(false) }}><section className="wiki-create-dialog" role="dialog" aria-modal="true" aria-labelledby="wiki-create-title"><div className="wiki-create-head"><div><div className="column-kicker">新建 Markdown 文件</div><h2 id="wiki-create-title">创建 Wiki 页面</h2></div><button type="button" className="icon-button" onClick={() => setCreateOpen(false)} disabled={creating} aria-label="关闭">×</button></div><form onSubmit={(event) => void createPage(event)}><label>页面标题<input autoFocus required maxLength={200} value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="例如：知识库导览" /></label><label>正文<textarea value={newBody} onChange={(event) => setNewBody(event.target.value)} rows={12} placeholder="写下页面正文。页面会以草稿状态创建。" /></label>{createError && <p className="wiki-form-error" role="alert">{createError}</p>}<div className="wiki-create-foot"><span>新页面会保存到 Wiki/Drafts</span><button type="button" className="secondary-button" onClick={() => setCreateOpen(false)} disabled={creating}>取消</button><button type="submit" className="primary-button" disabled={creating || !newTitle.trim()}>{creating ? '正在创建…' : '创建页面'}</button></div></form></section></div>}
+    {createOpen && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !creating) setCreateOpen(false) }}><section className="wiki-create-dialog" role="dialog" aria-modal="true" aria-labelledby="wiki-create-title"><div className="wiki-create-head"><div><div className="column-kicker">新建 Markdown 文件</div><h2 id="wiki-create-title">创建 Wiki 页面</h2></div><button type="button" className="icon-button" onClick={() => setCreateOpen(false)} disabled={creating} aria-label="关闭"><X aria-hidden="true" size={16} weight="regular" /></button></div><form onSubmit={(event) => void createPage(event)}><label>页面标题<input autoFocus required maxLength={200} value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="例如：知识库导览" /></label><label>正文<textarea value={newBody} onChange={(event) => setNewBody(event.target.value)} rows={12} placeholder="写下页面正文。页面会以草稿状态创建。" /></label>{createError && <p className="wiki-form-error" role="alert">{createError}</p>}<div className="wiki-create-foot"><span>新页面会保存到 Wiki/Drafts</span><button type="button" className="secondary-button" onClick={() => setCreateOpen(false)} disabled={creating}>取消</button><button type="submit" className="primary-button" disabled={creating || !newTitle.trim()}>{creating ? '正在创建…' : '创建页面'}</button></div></form></section></div>}
   </main>
 }

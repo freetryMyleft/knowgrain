@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { GearSix } from '@phosphor-icons/react/dist/csr/GearSix'
+import { X } from '@phosphor-icons/react/dist/csr/X'
 
 type VaultStatus = {
   binding_id: string | null
@@ -358,7 +360,7 @@ export default function VaultSettings({ onVaultSelected }: VaultSettingsProps) {
 
   return <>
     <button ref={triggerRef} className="vault-settings-trigger" type="button" onClick={openDialog} aria-haspopup="dialog" aria-expanded={isOpen}>
-      <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.6.9l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.6-.9l-1.7.7-1.4-2.4 1.4-1.1a7 7 0 0 1 0-1.9l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.6-.9l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.6.9l1.7-.7 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.8Z" transform="translate(-1 -1) scale(.96)" /></svg>
+      <GearSix aria-hidden="true" size={15} weight="regular" />
       <span>Vault 设置</span>
     </button>
 
@@ -370,7 +372,7 @@ export default function VaultSettings({ onVaultSelected }: VaultSettingsProps) {
               <span className="vault-dialog-eyebrow">本机存储位置</span>
               <h2 id="vault-dialog-title">Vault 设置</h2>
             </div>
-            <button ref={closeButtonRef} className="vault-dialog-close" type="button" onClick={closeDialog} aria-label="关闭 Vault 设置">×</button>
+            <button ref={closeButtonRef} className="vault-dialog-close" type="button" onClick={closeDialog} aria-label="关闭 Vault 设置"><X aria-hidden="true" size={16} weight="regular" /></button>
           </div>
           <p id="vault-dialog-description" className="vault-dialog-intro">选择一个资料文件夹。预览只会检查路径，不会创建或更改文件。</p>
 

@@ -1,4 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowClockwise } from '@phosphor-icons/react/dist/csr/ArrowClockwise'
+import { ArrowCounterClockwise } from '@phosphor-icons/react/dist/csr/ArrowCounterClockwise'
+import { CaretRight } from '@phosphor-icons/react/dist/csr/CaretRight'
+import { Check } from '@phosphor-icons/react/dist/csr/Check'
+import { Clock } from '@phosphor-icons/react/dist/csr/Clock'
+import { Database } from '@phosphor-icons/react/dist/csr/Database'
+import { FileText } from '@phosphor-icons/react/dist/csr/FileText'
+import { HardDrives } from '@phosphor-icons/react/dist/csr/HardDrives'
+import { MagnifyingGlass } from '@phosphor-icons/react/dist/csr/MagnifyingGlass'
+import { Plus } from '@phosphor-icons/react/dist/csr/Plus'
+import { UploadSimple } from '@phosphor-icons/react/dist/csr/UploadSimple'
+import { Warning } from '@phosphor-icons/react/dist/csr/Warning'
+import { X } from '@phosphor-icons/react/dist/csr/X'
 import VaultSettings from './VaultSettings'
 import SourceLifecyclePanel from './SourceLifecyclePanel'
 import CoreMaintenancePanel from './CoreMaintenancePanel'
@@ -126,22 +139,22 @@ async function requestJson<T>(path: string, init: RequestInit = {}, allowedStatu
 }
 
 function Icon({ name, size = 18 }: { name: 'grain' | 'file' | 'refresh' | 'upload' | 'plus' | 'clock' | 'check' | 'alert' | 'retry' | 'database' | 'server' | 'chevron' | 'search'; size?: number }) {
-  const paths: Record<typeof name, React.ReactNode> = {
-    grain: <><path d="M12 21V9" /><path d="M12 16c-4.1 0-6.8-2.4-6.8-6 4.1 0 6.8 2.4 6.8 6Z" /><path d="M12 12c4 0 6.8-2.4 6.8-6-4 0-6.8 2.4-6.8 6Z" /><path d="M12 7c-2.5 0-4-1.6-4-4 2.5 0 4 1.6 4 4Z" /><path d="M12 7c2.5 0 4-1.6 4-4-2.5 0-4 1.6-4 4Z" /></>,
-    file: <><path d="M6 3.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 20V5a1.5 1.5 0 0 1 1-1.5Z" /><path d="M13 4v5h5M8 13h8M8 16.5h8" /></>,
-    refresh: <><path d="M20 7v5h-5" /><path d="M4.9 9a7.5 7.5 0 0 1 12.5-2L20 12M4 17v-5h5" /><path d="M19.1 15a7.5 7.5 0 0 1-12.5 2L4 12" /></>,
-    upload: <><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M4 16.5v3A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-3" /></>,
-    plus: <><path d="M12 5v14M5 12h14" /></>,
-    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
-    check: <><path d="m5 12.5 4.2 4.2L19.5 6.5" /></>,
-    alert: <><path d="M12 3 2.8 19a1.3 1.3 0 0 0 1.1 2h16.2a1.3 1.3 0 0 0 1.1-2L12 3Z" /><path d="M12 9v4.5M12 17h.01" /></>,
-    retry: <><path d="M20 11a8 8 0 0 0-14-5L4 8" /><path d="M4 4v4h4" /><path d="M4 13a8 8 0 0 0 14 5l2-2" /><path d="M20 20v-4h-4" /></>,
-    database: <><ellipse cx="12" cy="5" rx="8.5" ry="3" /><path d="M3.5 5v7c0 1.7 3.8 3 8.5 3 .7 0 1.4 0 2-.1M20.5 5v5" /><path d="M3.5 12v7c0 1.7 3.8 3 8.5 3 .7 0 1.4 0 2-.1M20.5 13v7M16 13h7M19.5 9.5v7" /></>,
-    server: <><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M7 7.5h.01M7 16.5h.01M11 7.5h6M11 16.5h6" /></>,
-    chevron: <><path d="m9 5 7 7-7 7" /></>,
-    search: <><circle cx="10.8" cy="10.8" r="6.7" /><path d="m16 16 4.4 4.4" /></>,
+  const props = { size, weight: 'regular' as const, 'aria-hidden': true as const }
+  switch (name) {
+    case 'grain': return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 21V9" /><path d="M12 16c-4.1 0-6.8-2.4-6.8-6 4.1 0 6.8 2.4 6.8 6Z" /><path d="M12 12c4 0 6.8-2.4 6.8-6-4 0-6.8 2.4-6.8 6Z" /><path d="M12 7c-2.5 0-4-1.6-4-4 2.5 0 4 1.6 4 4Z" /><path d="M12 7c2.5 0 4-1.6 4-4-2.5 0-4 1.6-4 4Z" /></svg>
+    case 'file': return <FileText {...props} />
+    case 'refresh': return <ArrowClockwise {...props} />
+    case 'upload': return <UploadSimple {...props} />
+    case 'plus': return <Plus {...props} />
+    case 'clock': return <Clock {...props} />
+    case 'check': return <Check {...props} />
+    case 'alert': return <Warning {...props} />
+    case 'retry': return <ArrowCounterClockwise {...props} />
+    case 'database': return <Database {...props} />
+    case 'server': return <HardDrives {...props} />
+    case 'chevron': return <CaretRight {...props} />
+    case 'search': return <MagnifyingGlass {...props} />
   }
-  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>
 }
 
 function statusLabel(value: string | null | undefined): { label: string; tone: string } {
@@ -694,7 +707,7 @@ export default function App() {
               <Icon name="search" size={15} />
               <span className="visually-hidden">筛选已加载资料</span>
               <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选已加载资料" />
-              {filter && <button type="button" className="clear-search" onClick={() => setFilter('')} aria-label="清除筛选">×</button>}
+              {filter && <button type="button" className="clear-search" onClick={() => setFilter('')} aria-label="清除筛选"><X aria-hidden="true" size={14} weight="regular" /></button>}
             </label>
             <span className="result-count">{visibleSources.length}{filter ? ' 条匹配' : ' 条资料'}</span>
           </div>

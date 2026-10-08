@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { ArrowSquareOut } from '@phosphor-icons/react/dist/csr/ArrowSquareOut'
 import EvidencePanel from './EvidencePanel'
 import { isPageDetailFor } from './wiki-contract'
 import type { PageDetail } from './wiki-contract'
@@ -91,13 +92,13 @@ function ClaimEvidence({ claim, evidence, current }: { claim: DraftClaim; eviden
           <span>证据 ID <code>{item.evidence_id}</code></span>
           <span>来源 ID <code>{item.source_id}</code></span>
           <span>修订 ID <code>{item.revision_id}</code></span>
-          <span>文本位置 {item.start}–{item.end}</span>
+          <span>文本位置 {item.start}-{item.end}</span>
           <span>原件 SHA-256 <code title={item.source_sha256}>{shortHash(item.source_sha256)}</code></span>
           <span>解析文本 SHA-256 <code title={item.parsed_text_sha256}>{shortHash(item.parsed_text_sha256)}</code></span>
           <span>引文 SHA-256 <code title={item.excerpt_sha256}>{shortHash(item.excerpt_sha256)}</code></span>
           <span>索引于 {formatDate(item.indexed_at)}</span>
         </div>
-        <button type="button" className="quiet-button" onClick={() => setSelectedEvidence(item.evidence_id)}>打开原文证据 ↗</button>
+        <button type="button" className="quiet-button" onClick={() => setSelectedEvidence(item.evidence_id)}>打开原文证据 <ArrowSquareOut aria-hidden="true" size={14} weight="regular" /></button>
       </article>)}
     </div>
     {selectedEvidence && <EvidencePanel evidenceId={selectedEvidence} onClose={() => setSelectedEvidence(null)} />}
