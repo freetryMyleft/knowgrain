@@ -2,6 +2,12 @@
 
 Full objective: M0 through M6 in architecture-and-development-plan.md and the attached goal objective. No milestone completion is inferred from a scaffold or static check.
 
+## Phase two planning — 2026-10-08
+
+- Added [phase-two plan](phase-two-plan.md): content/index policy, persistent relationship corrections, change impact and maintenance inbox, temporal conflicts, parsing quality, retrieval diagnostics/templates, and optional local decision-model evaluation.
+- Planning only: all P2-01–P2-07 nodes remain pending. No runtime, model dependency, migration, or UI behavior was changed by this planning node.
+- Existing M5 rebuilding, required graph/automatic Wiki relationship delivery, provider settings and M6 release acceptance remain phase-one obligations. Phase two does not mark them complete or defer them; its production rollout follows their acceptance.
+
 ## M0
 
 - Implemented: locked Python dependencies, LightRAG 1.5.7 lifecycle, same-loop guard, PostgreSQL/Ollama probes, embedding dimension check, degraded FastAPI startup, explicit retry and restart-required state after storage failure. Tokenizer resources are explicitly installed and verified before Core startup.
