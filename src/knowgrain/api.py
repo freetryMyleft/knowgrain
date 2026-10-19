@@ -1,13 +1,13 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import asyncio
 from dataclasses import asdict, dataclass, field
-import logging
 from pathlib import Path
-from uuid import UUID
 from typing import Literal
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Query, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -15,32 +15,34 @@ from starlette.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from knowgrain.config import Settings
+from knowgrain.core_generation_repository import CoreGenerationRepository
 from knowgrain.core_maintenance_api import install_core_maintenance_routes
 from knowgrain.core_maintenance_runner import CoreMaintenanceRunner
-from knowgrain.generation_api import install_generation_routes
-from knowgrain.generation_repository import GenerationRepository
-from knowgrain.generation_service import GenerationService
-from knowgrain.evidence_access import EvidenceAccess
+from knowgrain.database import ApplicationDatabase
 from knowgrain.entity_mapping_api import install_entity_mapping_routes
 from knowgrain.entity_mapping_repository import EntityMappingRepository
 from knowgrain.entity_mapping_service import EntityMappingService
-from knowgrain.query_api import install_query_routes
-from knowgrain.query_repository import QueryRepository
-from knowgrain.query_service import QueryService
-from knowgrain.reconciliation import ReconciliationService
-from knowgrain.database import ApplicationDatabase
+from knowgrain.evidence_access import EvidenceAccess
+from knowgrain.generation_api import install_generation_routes
+from knowgrain.generation_repository import GenerationRepository
+from knowgrain.generation_service import GenerationService
 from knowgrain.job_runner import IndexJobRunner
 from knowgrain.lightrag_runtime import LightRAGRuntime
 from knowgrain.provenance import ProvenanceService
 from knowgrain.provenance_repository import ProvenanceRepository
-from knowgrain.source_repository import SourceRepository, SourceConflictError, SourceNotFoundError
-from knowgrain.source_service import SourceService, InvalidUploadError
-from knowgrain.source_lifecycle_api import install_source_lifecycle_routes
+from knowgrain.query_api import install_query_routes
+from knowgrain.query_repository import QueryRepository
+from knowgrain.query_service import QueryService
+from knowgrain.reconciliation import ReconciliationService
+from knowgrain.source_archive_files import SourceArchiveFiles
 from knowgrain.source_file_api import install_source_file_routes
 from knowgrain.source_file_repository import SourceFileRepository
-from knowgrain.source_file_service import SourceFileService
 from knowgrain.source_file_runner import SourceFileRunner
-from knowgrain.source_archive_files import SourceArchiveFiles
+from knowgrain.source_file_service import SourceFileService
+from knowgrain.source_lifecycle_api import install_source_lifecycle_routes
+from knowgrain.source_repository import SourceConflictError, SourceNotFoundError, SourceRepository
+from knowgrain.source_service import InvalidUploadError, SourceService
+from knowgrain.upload_limits import UploadBodyLimitMiddleware
 from knowgrain.vault import VaultStore
 from knowgrain.vault_setup import (
     VaultDatabaseUnavailable,
@@ -48,7 +50,6 @@ from knowgrain.vault_setup import (
     VaultSelectionConflict,
     VaultSetupService,
 )
-from knowgrain.upload_limits import UploadBodyLimitMiddleware
 from knowgrain.wiki_api import install_wiki_routes
 from knowgrain.wiki_repository import WikiRepository
 from knowgrain.wiki_service import WikiService
@@ -120,6 +121,7 @@ class ApplicationRuntime:
     settings: Settings
     lightrag: LightRAGRuntime = field(init=False)
     database: ApplicationDatabase = field(init=False)
+    core_generations: CoreGenerationRepository = field(init=False)
     repository: SourceRepository = field(init=False)
     vault: VaultStore = field(init=False)
     vault_setup: VaultSetupService = field(init=False)
@@ -141,12 +143,14 @@ class ApplicationRuntime:
     vault_ready: bool = field(default=False, init=False)
     vault_error: str | None = field(default=None, init=False)
     initialization_error: str | None = field(default=None, init=False)
+    core_generation_id: UUID | None = field(default=None, init=False)
     _runtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _file_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     def __post_init__(self) -> None:
         self.lightrag = LightRAGRuntime(self.settings)
         self.database = ApplicationDatabase(self.settings)
+        self.core_generations = CoreGenerationRepository(self.database)
         self.repository = SourceRepository(self.database)
         self.source_files_repository = SourceFileRepository(self.database, self.repository)
         # Vault paths are resolved only after the app database is ready and the
@@ -194,14 +198,24 @@ class ApplicationRuntime:
                     raise VaultDatabaseUnavailable(
                         self.database.last_error or "Application database is unavailable."
                     )
+                self.core_generation_id = await self.core_generations.bootstrap_legacy(
+                    self.lightrag.index_identity
+                )
                 new_vault, _ = await self.vault_setup.initialize()
                 self._install_vault(new_vault)
             except Exception as exc:
-                self.vault_ready = False
                 if isinstance(exc, (VaultDatabaseUnavailable, VaultPathSetupError)):
+                    self.vault_ready = False
                     self.vault_error = str(exc)
                 else:
-                    self.vault_error = f"Vault initialization failed ({type(exc).__name__})"
+                    self.vault_ready = False
+                    self.core_generation_id = None
+                    self.vault_error = None
+                    self.initialization_error = self._redact_detail(
+                        f"Startup generation or Vault initialization failed ({type(exc).__name__})"
+                    )
+                    logger.warning("Startup initialization failed: %s", self.initialization_error)
+                    return False
             else:
                 self.vault_ready = True
                 self.vault_error = None

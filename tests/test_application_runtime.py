@@ -1,7 +1,7 @@
 import asyncio
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -22,6 +22,8 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(runtime.database, "initialize", side_effect=database_ready),
+            patch.object(runtime.core_generations, "bootstrap_legacy", new_callable=AsyncMock,
+                         return_value=uuid4()),
             patch.object(runtime.vault_setup, "initialize", new_callable=AsyncMock,
                          return_value=(runtime.vault, {})),
             patch.object(ApplicationRuntime, "_install_vault"),
@@ -74,6 +76,8 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             # Keep the real runner; only replace external dependencies.
             with (
                 patch.object(runtime.database, "initialize", side_effect=initialize_database),
+                patch.object(runtime.core_generations, "bootstrap_legacy", new_callable=AsyncMock,
+                             return_value=uuid4()),
                 patch.object(
                     runtime.vault_setup,
                     "initialize",
@@ -93,6 +97,8 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with (
                     patch.object(runtime.database, "initialize", side_effect=initialize_database),
+                    patch.object(runtime.core_generations, "bootstrap_legacy", new_callable=AsyncMock,
+                                 return_value=uuid4()),
                     patch.object(runtime.vault_setup, "initialize", side_effect=initialize_vault),
                     patch.object(runtime.repository, "claim_job", side_effect=claim),
                     patch.object(runtime.repository, "list_reconciliation_candidates", new_callable=AsyncMock, return_value=[]),
@@ -125,6 +131,41 @@ class ApplicationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 runtime.lightrag._rag = None
                 runtime.database.is_ready = False
                 await runtime.close()
+
+    async def test_generation_ledger_bootstrap_failure_blocks_all_workers(self):
+        runtime = ApplicationRuntime(Settings(_env_file=None))
+
+        async def database_ready():
+            runtime.database.is_ready = True
+            return True
+
+        with (
+            patch.object(runtime.database, "initialize", side_effect=database_ready),
+            patch.object(
+                runtime.core_generations,
+                "bootstrap_legacy",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("ledger unavailable"),
+            ),
+            patch.object(runtime.vault_setup, "initialize", new_callable=AsyncMock) as vault,
+            patch.object(runtime.file_jobs, "start") as files,
+            patch.object(runtime.jobs, "start") as jobs,
+            patch.object(runtime.maintenance, "start") as maintenance,
+            patch.object(runtime.generation, "start") as generation,
+            patch.object(runtime.queries, "start", new_callable=AsyncMock) as queries,
+        ):
+            self.assertFalse(await runtime.initialize())
+            self.assertFalse(runtime.vault_ready)
+            self.assertIsNone(runtime.core_generation_id)
+            self.assertIn("generation or Vault initialization failed", runtime.initialization_error)
+            vault.assert_not_awaited()
+            files.assert_not_called()
+            jobs.assert_not_called()
+            maintenance.assert_not_called()
+            generation.assert_not_called()
+            queries.assert_not_awaited()
+        runtime.database.is_ready = False
+        await runtime.close()
 
     async def test_failed_same_root_selection_disables_imports_and_stops_claims(self):
         with TemporaryDirectory(dir=Path.cwd()) as temporary:
